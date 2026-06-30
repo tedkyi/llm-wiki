@@ -58,7 +58,7 @@ Return ONLY a valid JSON object matching this exact schema:
 {
   "title": "A clear, specific title for this source (max 80 chars)",
   "source_slug": "kebab-case-slug-for-this-source",
-  "summary": "A 2-3 sentence paragraph summarizing the source",
+  "summary": "A 2-3 sentence paragraph summarizing the source, always starting with what is the problem being solved",
   "key_takeaways": [
     "Bullet 1 — a substantive takeaway (1-2 sentences)",
     "Bullet 2",
@@ -84,7 +84,8 @@ Return ONLY a valid JSON object matching this exact schema:
 }
 
 Rules:
-- Extract 3-8 key takeaways, each substantive.
+- Extract 3-8 key takeaways, each substantive. Include what is novel compared to prior work. 
+  Also include any limitations, caveats, or open questions.
 - Extract 2-10 entities (people, organizations, models, products, places mentioned).
 - Extract 2-10 concepts (techniques, ideas, topics discussed).
 - Slugs must be kebab-case ASCII. For people use last name if unambiguous
