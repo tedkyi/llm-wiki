@@ -121,6 +121,7 @@ class OllamaClient:
         thinking: bool = False,
         json_mode: bool = False,
         temperature: float = 0.3,
+        num_predict: int | None = 8192,
     ) -> str:
         """Non-streaming chat. Returns the full assistant message content.
 
@@ -128,11 +129,14 @@ class OllamaClient:
         inline tags in the last user message.
         """
         payload_messages = self._prepare_messages(messages, thinking=thinking)
+        options: dict = {"temperature": temperature}
+        if num_predict is not None:
+            options["num_predict"] = num_predict
         payload = {
             "model": self.model,
             "messages": payload_messages,
             "stream": False,
-            "options": {"temperature": temperature, "num_predict": 4096},
+            "options": options,
         }
         if json_mode:
             payload["format"] = "json"
@@ -169,6 +173,7 @@ class OllamaClient:
         *,
         thinking: bool = False,
         temperature: float = 0.3,
+        num_predict: int | None = 8192,
     ) -> Generator[str, None, str]:
         """Streaming chat. Yields content chunks as they arrive.
 
@@ -181,11 +186,14 @@ class OllamaClient:
                 return full
         """
         payload_messages = self._prepare_messages(messages, thinking=thinking)
+        options: dict = {"temperature": temperature}
+        if num_predict is not None:
+            options["num_predict"] = num_predict
         payload = {
             "model": self.model,
             "messages": payload_messages,
             "stream": True,
-            "options": {"temperature": temperature, "num_predict": 4096},
+            "options": options,
         }
 
         full_content: list[str] = []
