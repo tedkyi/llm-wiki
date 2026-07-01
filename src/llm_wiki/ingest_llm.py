@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +112,8 @@ class IngestCallbacks:
     """
 
     def on_start(self, source_id: int, source_title: str, file_path: str) -> None: ...
+
+    def on_verbose_log_path(self, log_path: str) -> None: ...
 
     def on_parsing(self) -> None: ...
 
@@ -238,6 +241,122 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# ---------------------------------------------------------------------------
+# Verbose diagnostic logger
+# ---------------------------------------------------------------------------
+
+
+class _IngestLogger:
+    """Writes a verbose diagnostic log for a single ingest run.
+
+    Flushes after every write so the file is readable even if the process
+    is killed mid-generation (useful for diagnosing hanging Ollama calls).
+    """
+
+    def __init__(self, log_path: Path) -> None:
+        self._path = log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._f = log_path.open("w", encoding="utf-8", buffering=1)
+
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3] + "Z"
+
+    def section(self, title: str) -> None:
+        sep = "=" * 60
+        self._f.write(f"\n{sep}\n[{self._ts()}] {title}\n{sep}\n")
+        self._f.flush()
+
+    def info(self, text: str) -> None:
+        self._f.write(f"[{self._ts()}] {text}\n")
+        self._f.flush()
+
+    def raw(self, label: str, content: str) -> None:
+        self._f.write(f"\n--- {label} ---\n{content}\n--- END {label} ---\n")
+        self._f.flush()
+
+    def close(self) -> None:
+        if not self._f.closed:
+            self._f.flush()
+            self._f.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+class _NoopLogger:
+    """Drop-in no-op when verbose_log=False."""
+
+    def section(self, title: str) -> None: ...
+    def info(self, text: str) -> None: ...
+    def raw(self, label: str, content: str) -> None: ...
+    def close(self) -> None: ...
+
+
+def _write_failure_log(
+    paths: cfg.WikiPaths,
+    source_id: int,
+    source_title: str,
+    step: str,
+    error: str,
+) -> Path:
+    """Write a minimal failure log for any ingest error (always-on, no flag needed)."""
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in source_title)[:60]
+    log_path = paths.logs / f"fail-{source_id}-{safe_title}-{ts}.log"
+    lines = [
+        f"Ingest failure log",
+        f"Timestamp   : {ts}",
+        f"Source ID   : {source_id}",
+        f"Source title: {source_title}",
+        f"Failed step : {step}",
+        f"",
+        f"Error:",
+        error,
+    ]
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+    return log_path
+
+
+def _write_extraction_log(
+    paths: cfg.WikiPaths,
+    source_title: str,
+    initial_response: str,
+    initial_error: str,
+    retry_response: str | None = None,
+    retry_error: str | None = None,
+) -> Path:
+    """Write a diagnostic log for an extraction failure and return the log path."""
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in source_title)[:60]
+    log_path = paths.logs / f"extraction-{safe_title}-{ts}.log"
+
+    lines = [
+        f"Extraction failure log",
+        f"Timestamp : {ts}",
+        f"Source    : {source_title}",
+        f"",
+        f"=== ATTEMPT 1 ERROR ===",
+        initial_error,
+        f"",
+        f"=== ATTEMPT 1 RAW RESPONSE ===",
+        initial_response,
+    ]
+    if retry_response is not None:
+        lines += [
+            f"",
+            f"=== RETRY ERROR ===",
+            retry_error or "",
+            f"",
+            f"=== RETRY RAW RESPONSE ===",
+            retry_response,
+        ]
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+    return log_path
+
+
 def _mark_source_status(
     paths: cfg.WikiPaths, source_id: int, status: str, last_ingested: str | None = None
 ) -> None:
@@ -326,6 +445,46 @@ def _auto_discover_pending(paths: cfg.WikiPaths) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _stream_with_retry(
+    client: OllamaClient,
+    messages: list,
+    callbacks: "IngestCallbacks",
+    logger: "_IngestLogger | _NoopLogger",
+    label: str,
+) -> tuple[str, float]:
+    """Stream an LLM response, retrying once after 5 s on any LLMError.
+
+    Returns (full_content, elapsed_seconds_of_final_successful_call).
+    """
+    for attempt in range(2):
+        if attempt == 1:
+            logger.info(f"LLM call failed for {label}; sleeping 5s before retry…")
+            time.sleep(5)
+            logger.info(f"Retrying {label}…")
+        _t0 = datetime.now(timezone.utc)
+        try:
+            full = ""
+            gen = client.chat_stream(messages, thinking=False, temperature=0.3)
+            try:
+                while True:
+                    chunk = next(gen)
+                    callbacks.on_stream_chunk(chunk)
+                    full += chunk
+            except StopIteration as stop:
+                if stop.value:
+                    full = stop.value
+            elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+            if not full.strip():
+                raise LLMError(f"Empty response from Ollama for {label}")
+            return full, elapsed
+        except LLMError:
+            elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+            logger.info(f"LLM call failed after {elapsed:.1f}s")
+            if attempt == 1:
+                raise
+    raise AssertionError("unreachable")
+
+
 def ingest_source(
     paths: cfg.WikiPaths,
     source_id: int,
@@ -334,9 +493,19 @@ def ingest_source(
     *,
     mode: str = "interactive",
     thinking_for_extraction: bool = True,
+    verbose_log: bool = True,
 ) -> IngestResult:
     """Run the full 3-pass ingest pipeline on a single source."""
     started = _now_iso()
+
+    # Set up verbose logger — created before any early returns so all paths can close it
+    if verbose_log:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _log_path = paths.logs / f"ingest-{source_id}-{ts}.log"
+        logger: _IngestLogger | _NoopLogger = _IngestLogger(_log_path)
+        callbacks.on_verbose_log_path(str(_log_path))
+    else:
+        logger = _NoopLogger()
 
     # 1. Load the source row
     with db.connect(paths.state_db) as conn:
@@ -351,10 +520,14 @@ def ingest_source(
                 error=f"No source with id {source_id}",
             )
             callbacks.on_error(result.error)
+            logger.close()
             return result
         source_row = dict(row)
 
     file_path = paths.root / source_row["relpath"]
+    logger.section(f"INGEST SOURCE #{source_id}")
+    logger.info(f"relpath : {source_row['relpath']}")
+    logger.info(f"started : {started}")
     callbacks.on_start(source_id, source_row["relpath"], str(file_path))
 
     # 2. Parse the source
@@ -368,6 +541,8 @@ def ingest_source(
             source_slug="?",
             error=f"Parse failed: {e}",
         )
+        logger.info(f"ERROR (parse): {e}")
+        logger.close()
         _mark_source_status(paths, source_id, "error")
         _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
         callbacks.on_error(result.error)
@@ -378,9 +553,14 @@ def ingest_source(
     if len(source_text) > MAX_SOURCE_CHARS:
         source_text = source_text[:MAX_SOURCE_CHARS] + "\n\n[... truncated ...]"
 
+    logger.info(f"parsed  : title={parsed.title!r}, file_type={parsed.file_type}, chars={len(source_text)}")
+
     # 3. Pass 1 — extraction
     callbacks.on_extracting()
     extraction_messages = prompts.build_extraction_messages(parsed.title, source_text)
+    logger.section("PASS 1 — EXTRACTION")
+    logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, temperature=0.3")
+    _t0 = datetime.now(timezone.utc)
     try:
         raw_response = client.chat(
             extraction_messages,
@@ -389,49 +569,100 @@ def ingest_source(
             temperature=0.3,
         )
     except (OllamaNotRunning, ModelNotFound) as e:
+        logger.info(f"ERROR (Ollama unreachable): {e}")
+        logger.close()
         result = IngestResult(
             source_id=source_id,
             source_title=parsed.title,
             source_slug="?",
             error=str(e),
         )
+        _write_failure_log(paths, source_id, parsed.title, "extraction (Ollama unreachable)", str(e))
         callbacks.on_error(result.error)
         # Don't mark as error — user needs to fix Ollama, then retry
         return result
     except LLMError as e:
-        result = IngestResult(
-            source_id=source_id,
-            source_title=parsed.title,
-            source_slug="?",
-            error=f"LLM error: {e}",
-        )
-        _mark_source_status(paths, source_id, "error")
-        _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
-        callbacks.on_error(result.error)
-        return result
+        # Retry once for transient errors (e.g. timeout)
+        logger.info(f"ERROR (LLM): {e} — retrying once…")
+        logger.section("PASS 1 — EXTRACTION RETRY")
+        logger.info("Sleeping 5s before retry…")
+        time.sleep(5)
+        logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, temperature=0.3")
+        _t0 = datetime.now(timezone.utc)
+        try:
+            raw_response = client.chat(
+                extraction_messages,
+                thinking=thinking_for_extraction,
+                json_mode=True,
+                temperature=0.3,
+            )
+        except LLMError as e2:
+            logger.info(f"ERROR (LLM): {e2}")
+            logger.close()
+            result = IngestResult(
+                source_id=source_id,
+                source_title=parsed.title,
+                source_slug="?",
+                error=f"LLM error: {e2}",
+            )
+            _write_failure_log(paths, source_id, parsed.title, "extraction (LLM error)", str(e2))
+            _mark_source_status(paths, source_id, "error")
+            _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
+            callbacks.on_error(result.error)
+            return result
+    _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+    logger.info(f"LLM call end: {_elapsed:.1f}s, {len(raw_response)} chars")
+    logger.raw("EXTRACTION RESPONSE", raw_response)
 
     try:
         extraction = _parse_extraction(raw_response)
+        logger.info(f"extraction parsed OK: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts")
     except ValueError as e:
         # Retry once with explicit correction
-        callbacks.on_extraction_failed(str(e))
+        initial_response = raw_response
+        initial_error = str(e)
+        logger.info(f"parse failed: {initial_error}")
+        callbacks.on_extraction_failed(initial_error)
+        retry_response: str | None = None
+        logger.section("PASS 1 — EXTRACTION RETRY")
+        logger.info("Sleeping 5s before retry…")
+        time.sleep(5)
+        logger.info("LLM call start: thinking=False, json_mode=True, temperature=0.2")
+        _t0 = datetime.now(timezone.utc)
         try:
             retry_messages = prompts.build_extraction_retry_messages(
                 parsed.title, source_text, raw_response
             )
-            raw_response = client.chat(
+            retry_response = client.chat(
                 retry_messages,
                 thinking=False,  # retry without thinking, faster
                 json_mode=True,
                 temperature=0.2,
             )
-            extraction = _parse_extraction(raw_response)
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+            logger.info(f"LLM call end: {_elapsed:.1f}s, {len(retry_response)} chars")
+            logger.raw("EXTRACTION RETRY RESPONSE", retry_response)
+            extraction = _parse_extraction(retry_response)
+            logger.info(f"retry parsed OK: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts")
         except (ValueError, LLMError) as e2:
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+            logger.info(f"ERROR after {_elapsed:.1f}s: {e2}")
+            if retry_response:
+                logger.raw("EXTRACTION RETRY RESPONSE", retry_response)
+            log_path = _write_extraction_log(
+                paths,
+                source_title=parsed.title,
+                initial_response=initial_response,
+                initial_error=initial_error,
+                retry_response=retry_response,
+                retry_error=str(e2),
+            )
+            logger.close()
             result = IngestResult(
                 source_id=source_id,
                 source_title=parsed.title,
                 source_slug="?",
-                error=f"Extraction failed after retry: {e2}",
+                error=f"Extraction failed after retry: {e2} (log: {log_path})",
             )
             _mark_source_status(paths, source_id, "error")
             _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
@@ -525,20 +756,15 @@ def ingest_source(
                     )
 
                 # Stream the response
-                full = ""
-                gen = client.chat_stream(messages, thinking=False, temperature=0.3)
-                try:
-                    while True:
-                        chunk = next(gen)
-                        callbacks.on_stream_chunk(chunk)
-                        full += chunk
-                except StopIteration as stop:
-                    if stop.value:
-                        full = stop.value
+                logger.section(f"PASS 2 — ENTITY {slug} ({operation})")
+                logger.info("Sleeping 1s before LLM call…")
+                time.sleep(1)
+                logger.info("LLM call start: thinking=False, temperature=0.3")
+                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"entity {slug}")
+                logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
+                logger.raw(f"ENTITY {slug}", full)
 
                 content = page_writer.strip_llm_noise(full)
-                if not content:
-                    raise LLMError(f"Empty response for entity '{slug}'")
 
                 # Validate frontmatter presence; if missing, wrap it
                 parsed_page = page_writer.parse_page(content)
@@ -569,12 +795,15 @@ def ingest_source(
                 callbacks.on_page_written(change)
 
             except LLMError as e:
+                logger.info(f"ERROR: {e}")
+                logger.close()
                 result = IngestResult(
                     source_id=source_id,
                     source_title=parsed.title,
                     source_slug=source_slug,
                     error=f"Failed drafting entity '{slug}': {e}",
                 )
+                _write_failure_log(paths, source_id, parsed.title, f"entity page '{slug}'", str(e))
                 _mark_source_status(paths, source_id, "error")
                 _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
                 callbacks.on_error(result.error)
@@ -615,20 +844,15 @@ def ingest_source(
                         today=today,
                     )
 
-                full = ""
-                gen = client.chat_stream(messages, thinking=False, temperature=0.3)
-                try:
-                    while True:
-                        chunk = next(gen)
-                        callbacks.on_stream_chunk(chunk)
-                        full += chunk
-                except StopIteration as stop:
-                    if stop.value:
-                        full = stop.value
+                logger.section(f"PASS 2 — CONCEPT {slug} ({operation})")
+                logger.info("Sleeping 1s before LLM call…")
+                time.sleep(1)
+                logger.info("LLM call start: thinking=False, temperature=0.3")
+                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"concept {slug}")
+                logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
+                logger.raw(f"CONCEPT {slug}", full)
 
                 content = page_writer.strip_llm_noise(full)
-                if not content:
-                    raise LLMError(f"Empty response for concept '{slug}'")
 
                 parsed_page = page_writer.parse_page(content)
                 if not parsed_page.frontmatter:
@@ -656,12 +880,15 @@ def ingest_source(
                 callbacks.on_page_written(change)
 
             except LLMError as e:
+                logger.info(f"ERROR: {e}")
+                logger.close()
                 result = IngestResult(
                     source_id=source_id,
                     source_title=parsed.title,
                     source_slug=source_slug,
                     error=f"Failed drafting concept '{slug}': {e}",
                 )
+                _write_failure_log(paths, source_id, parsed.title, f"concept page '{slug}'", str(e))
                 _mark_source_status(paths, source_id, "error")
                 _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
                 callbacks.on_error(result.error)
@@ -686,16 +913,13 @@ def ingest_source(
                 today=today,
             )
 
-            full = ""
-            gen = client.chat_stream(messages, thinking=False, temperature=0.3)
-            try:
-                while True:
-                    chunk = next(gen)
-                    callbacks.on_stream_chunk(chunk)
-                    full += chunk
-            except StopIteration as stop:
-                if stop.value:
-                    full = stop.value
+            logger.section(f"PASS 3 — SOURCE PAGE {source_slug}")
+            logger.info("Sleeping 1s before LLM call…")
+            time.sleep(1)
+            logger.info("LLM call start: thinking=False, temperature=0.3")
+            full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"source page {source_slug}")
+            logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
+            logger.raw(f"SOURCE PAGE {source_slug}", full)
 
             content = page_writer.strip_llm_noise(full)
             parsed_page = page_writer.parse_page(content)
@@ -724,12 +948,15 @@ def ingest_source(
             callbacks.on_page_written(change)
 
         except LLMError as e:
+            logger.info(f"ERROR: {e}")
+            logger.close()
             result = IngestResult(
                 source_id=source_id,
                 source_title=parsed.title,
                 source_slug=source_slug,
                 error=f"Failed drafting source page: {e}",
             )
+            _write_failure_log(paths, source_id, parsed.title, "source page", str(e))
             _mark_source_status(paths, source_id, "error")
             _record_ingest_run(paths, source_id, started, mode, 0, 0, result.error)
             callbacks.on_error(result.error)
@@ -779,6 +1006,9 @@ def ingest_source(
             pages_updated=pages_updated,
             changes=changes,
         )
+        logger.section("COMPLETE")
+        logger.info(f"pages_created={pages_created}, pages_updated={pages_updated}")
+        logger.close()
         callbacks.on_complete(result)
         return result
 
@@ -794,6 +1024,7 @@ def ingest_pending(
     mode: str = "interactive",
     auto_discover: bool = True,
     thinking_for_extraction: bool = True,
+    verbose_log: bool = True,
 ) -> list[IngestResult]:
     """Ingest all pending sources in the DB.
 
@@ -827,6 +1058,7 @@ def ingest_pending(
             cb,
             mode=mode,
             thinking_for_extraction=thinking_for_extraction,
+            verbose_log=verbose_log,
         )
         results.append(result)
         if result.error and "Ollama" in result.error:
