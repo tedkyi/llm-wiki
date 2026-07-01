@@ -520,6 +520,21 @@ def sources_rm_cmd(
         raise typer.Exit(code=1)
 
 
+@sources_app.command("reingest")
+def sources_reingest_cmd(
+    source_id: int = typer.Argument(..., help="The source ID to reset (from `wiki sources list`)."),
+) -> None:
+    """Reset a source to 'pending' so it will be re-ingested on the next `wiki ingest` run."""
+    paths = _resolve_root_or_die()
+    ok, msg = ingest_raw.mark_source_pending(paths, source_id)
+    if ok:
+        _ok(msg)
+        _hint("Run [bold]wiki ingest[/bold] to process it.")
+    else:
+        _err(msg)
+        raise typer.Exit(code=1)
+
+
 # ---------------------------------------------------------------------------
 # Stage 3 — LLM ingest
 # ---------------------------------------------------------------------------
@@ -578,6 +593,9 @@ class CliIngestCallbacks(ingest_llm.IngestCallbacks):
         if extraction.tags:
             console.print(f"[bold]Tags:[/bold] [dim]{', '.join(extraction.tags)}[/dim]")
             console.print()
+
+    def on_verbose_log_path(self, log_path: str) -> None:
+        console.print(f"[dim]  verbose log → {log_path}[/dim]")
 
     def on_extraction_failed(self, error: str) -> None:
         _warn(f"Extraction returned bad JSON. Retrying: {error[:200]}")
@@ -653,6 +671,11 @@ def ingest(
         "--no-thinking",
         help="Disable Qwen3 thinking mode in Pass 1 (faster, slightly lower quality).",
     ),
+    verbose_log: bool = typer.Option(
+        True,
+        "--verbose-log/--no-verbose-log",
+        help="Write a full diagnostic log for each source to .wiki/logs/ (raw LLM responses, timings, errors). On by default.",
+    ),
 ) -> None:
     """Ingest pending sources: extract entities/concepts, write wiki pages.
 
@@ -702,6 +725,7 @@ def ingest(
                 cb,
                 mode=mode,
                 thinking_for_extraction=thinking,
+                verbose_log=verbose_log,
             )
             results = [result]
         else:
@@ -713,6 +737,7 @@ def ingest(
                 mode=mode,
                 auto_discover=not no_discover,
                 thinking_for_extraction=thinking,
+                verbose_log=verbose_log,
             )
     finally:
         client.close()
@@ -745,13 +770,17 @@ def ingest(
     console.print()
 
     if ok_count > 0:
-        # Auto-rebuild the search index so queries find the new pages
+        # Rebuild FTS immediately (fast), then embed in background.
+        # BM25 keyword search is usable right away; vector search catches up
+        # while hints are shown. The embed thread is non-daemon so the process
+        # stays alive until it finishes — no orphaned GPU work.
         if search.is_available():
             console.print()
             console.print("[dim]Updating search index…[/dim]")
             try:
-                search.update_index(paths, embed=True)
-                _ok("Search index updated")
+                search.update_fts(paths)
+                search.schedule_embed(paths)
+                _ok("BM25 index ready; vector embeddings building in background")
             except search.SearchBackendError as e:
                 _warn(f"Search index update failed: {e}")
                 _hint("You can retry manually later — ingest is already committed.")
