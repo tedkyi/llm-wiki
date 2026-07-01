@@ -520,8 +520,8 @@ def sources_rm_cmd(
         raise typer.Exit(code=1)
 
 
-@sources_app.command("reingest")
-def sources_reingest_cmd(
+@app.command()
+def reingest(
     source_id: int = typer.Argument(..., help="The source ID to reset (from `wiki sources list`)."),
 ) -> None:
     """Reset a source to 'pending' so it will be re-ingested on the next `wiki ingest` run."""
