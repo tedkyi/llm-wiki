@@ -81,7 +81,7 @@ Return ONLY a valid JSON object matching this exact schema:
     {
       "name": "Canonical name as it would appear in a wiki",
       "slug": "kebab-case-slug",
-      "type": "person | organization | model | product | place",
+      "type": "person | organization | place",
       "description": "1-2 sentences describing this entity based on the source"
     }
   ],
@@ -96,22 +96,25 @@ Return ONLY a valid JSON object matching this exact schema:
   "tags": ["tag1", "tag2", "tag3"]
 }
 
+CRITICAL FORMAT RULE: Every item in "entities" and "concepts" MUST be a JSON object with
+exactly these four keys: "name", "slug", "type", "description".
+Plain strings are NEVER allowed. The following is WRONG and will break the pipeline:
+  "entities": ["Jean-Bastien Grill", "DeepMind"]
+The correct form is ALWAYS:
+  "entities": [{"name": "Jean-Bastien Grill", "slug": "grill", "type": "person", "description": "..."},
+               {"name": "DeepMind", "slug": "deepmind", "type": "organization", "description": "..."}]
+
 Rules:
 - Extract 3-8 key takeaways, each substantive. Include what is novel compared to prior work. 
   Also include any limitations, caveats, or open questions.
-- Extract 2-10 entities (people, organizations, models, products, places mentioned).
+- Extract 2-7 entities (people, organizations, places mentioned).
   Entities must be proper nouns with a specific, named identity (e.g. GPT-4, OpenAI, Yann LeCun).
-  CRITICAL: Do NOT put algorithms, architectures, techniques, or building blocks in entities — those are concepts.
-  The test: could this be mistaken for a generic type or class of thing? If yes, it is a concept, not an entity.
+  CRITICAL: Do NOT put models, algorithms, architectures, techniques, or building blocks in entities — those are concepts.
+  Only people, organizations, and places -- all proper nouns -- are valid entities.
   FORBIDDEN as entities (these are always concepts, never entities, no matter what):
-    Transformer, Attention, Self-Attention, Multi-Head Attention, Backpropagation,
-    Wake-Sleep Algorithm, Variational Autoencoder, Diffusion Model, Neural Network,
-    Convolutional Neural Network, Recurrent Neural Network, Language Model,
+    Transformer, Attention, Self-Attention, Multi-Head Attention, Language Model,
     Residual Network, Feed-Forward Network, and any other general architecture or algorithm.
-  Specific named model instances ARE entities only when they have a unique product identity
-  (e.g. GPT-4, DALL-E 3, Gemini 1.5 Pro) — generic architecture names like "Transformer"
-  or "BERT" used as an architectural class are not.
-- Extract 2-10 concepts (techniques, ideas, algorithms, architectures, and topics discussed).
+- Extract 2-10 concepts (techniques, ideas, algorithms, models, architectures, and topics discussed).
   Concepts are generic or named ideas, not specific named instances of a product or organization.
 - Slugs must be kebab-case ASCII. For people use last name if unambiguous
   (karpathy, not andrej-karpathy). For concepts use the shortest canonical
@@ -142,7 +145,9 @@ def build_extraction_retry_messages(
     """Retry prompt after a JSON parse failure."""
     user_content = (
         f"Your previous response was not valid JSON. Return ONLY a valid JSON "
-        f"object matching the schema — no markdown fences, no preamble.\n\n"
+        f"object matching the schema — no markdown fences, no preamble.\n"
+        f"REMINDER: each item in 'entities' and 'concepts' must be a JSON object "
+        f"with name/slug/type/description keys — never a plain string.\n\n"
         f"{EXTRACTION_INSTRUCTIONS}\n\n"
         f"---SOURCE TITLE---\n{source_title}\n\n"
         f"---SOURCE TEXT---\n{source_text}\n"
