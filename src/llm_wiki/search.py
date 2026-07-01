@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -28,6 +29,18 @@ from . import config as cfg
 QMD_TIMEOUT_SHORT = 30.0      # for quick commands (status, collection list)
 QMD_TIMEOUT_MEDIUM = 600.0    # for query (after models are loaded)
 QMD_TIMEOUT_LONG = 1800.0     # for update + embed (30 minutes)
+
+# ---------------------------------------------------------------------------
+# Background embed scheduler
+# ---------------------------------------------------------------------------
+# Only one `qmd embed` subprocess runs at a time (loading a 300M GGUF model
+# concurrently would just fight over GPU VRAM / CPU cache). If a second
+# ingest finishes while embed is running, we set _embed_pending so the
+# worker loops and picks up the new docs immediately after finishing.
+
+_embed_lock = threading.Lock()
+_embed_pending: bool = False
+_embed_thread: threading.Thread | None = None
 
 
 class SearchBackendError(Exception):
@@ -93,11 +106,19 @@ def _qmd_env(paths: cfg.WikiPaths) -> dict[str, str]:
 
     QMD uses XDG_CACHE_HOME to locate its default index. We override it to
     keep each wiki's index isolated inside .wiki/qmd-cache/ .
+
+    QMD_LLAMA_GPU controls llama.cpp GPU offloading: "auto" (default), "cuda",
+    "vulkan", "metal", or "false" for CPU-only. We read it from search.gpu in
+    config, but the user can always override via environment variable.
     """
     env = os.environ.copy()
     cache_dir = paths.internal / "qmd-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["XDG_CACHE_HOME"] = str(cache_dir)
+    if "QMD_LLAMA_GPU" not in env:
+        config = cfg.load_config(paths)
+        gpu = config.get("search", {}).get("gpu", "auto")
+        env["QMD_LLAMA_GPU"] = str(gpu)
     return env
 
 
@@ -212,11 +233,74 @@ def ensure_collections(paths: cfg.WikiPaths) -> list[str]:
     return added
 
 
-def update_index(paths: cfg.WikiPaths, embed: bool = True) -> None:
-    """Rebuild the QMD full-text index, then optionally generate embeddings.
+def update_fts(paths: cfg.WikiPaths) -> None:
+    """Rebuild the BM25 full-text index only. Fast (seconds, no model load).
 
-    This is cheap after a small ingest; embed is the slower step (model
-    loading + encoding). Safe to call repeatedly.
+    Call this immediately after an ingest so keyword search works right away,
+    then call schedule_embed() to generate vector embeddings in background.
+    """
+    ensure_collections(paths)
+    _run_qmd(paths, ["update"], timeout=QMD_TIMEOUT_LONG)
+
+
+def _embed_worker(paths: cfg.WikiPaths) -> None:
+    """Thread target: run embed, then re-run if more docs arrived during it."""
+    global _embed_pending, _embed_thread
+    while True:
+        with _embed_lock:
+            _embed_pending = False
+        try:
+            _run_qmd(paths, ["embed"], timeout=QMD_TIMEOUT_LONG)
+        except SearchBackendError:
+            pass
+        with _embed_lock:
+            if not _embed_pending:
+                _embed_thread = None
+                return
+            # Another ingest finished while we were embedding — loop once more
+            # to pick up its new docs without starting a second model load.
+
+
+def schedule_embed(paths: cfg.WikiPaths) -> bool:
+    """Schedule a background vector embedding pass.
+
+    Returns True if a new worker thread was started, False if one was already
+    running (the new docs will be picked up when it loops).
+
+    The worker thread is non-daemon so the process stays alive until embeddings
+    finish. Callers that want to wait can call wait_for_embed().
+    """
+    global _embed_pending, _embed_thread
+    with _embed_lock:
+        _embed_pending = True
+        if _embed_thread is not None and _embed_thread.is_alive():
+            return False
+        _embed_thread = threading.Thread(
+            target=_embed_worker, args=(paths,), daemon=False, name="qmd-embed"
+        )
+        _embed_thread.start()
+        return True
+
+
+def wait_for_embed(timeout: float | None = None) -> bool:
+    """Block until the background embed thread finishes (or timeout expires).
+
+    Returns True if no embed is running or it completed within the timeout.
+    """
+    with _embed_lock:
+        thread = _embed_thread
+    if thread is None or not thread.is_alive():
+        return True
+    thread.join(timeout=timeout)
+    return not thread.is_alive()
+
+
+def update_index(paths: cfg.WikiPaths, embed: bool = True) -> None:
+    """Rebuild FTS index and optionally embed, both synchronously.
+
+    Use this for the explicit `wiki reindex` command. For post-ingest
+    auto-updates prefer update_fts() + schedule_embed() so BM25 is
+    immediately available and embedding runs in background.
     """
     ensure_collections(paths)
     _run_qmd(paths, ["update"], timeout=QMD_TIMEOUT_LONG)

@@ -755,7 +755,8 @@ def apply_fixes(paths: cfg.WikiPaths, issues: list[LintIssue]) -> int:
     if total_modified > 0:
         try:
             from . import search
-            search.update_index(paths, embed=True)
+            search.update_fts(paths)
+            search.schedule_embed(paths)
         except Exception:
             pass
 
