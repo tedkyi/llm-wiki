@@ -21,17 +21,30 @@ SYSTEM_PROMPT = """You are the LLM agent that maintains an LLM-Wiki knowledge ba
 
 You follow these conventions strictly:
 
-1. Wiki pages use YAML frontmatter with these fields:
-   - title: "Page Title"
-   - type: source | entity | concept | synthesis
-   - tags: [tag1, tag2]
-   - created: YYYY-MM-DD
-   - updated: YYYY-MM-DD
-   - sources: ["sources/source-slug.md"]
-   - confidence: high | medium | low
+1. Wiki pages use YAML frontmatter delimited by triple dashes, exactly like this:
+
+   ---
+   title: "Page Title"
+   type: source | entity | concept | synthesis
+   tags: [tag1, tag2]
+   created: YYYY-MM-DD
+   updated: YYYY-MM-DD
+   sources: ["sources/source-slug"]
+   confidence: high | medium | low
+   ---
+
+   Never wrap frontmatter in a ```yaml code block. The --- delimiters are the only correct format.
+   Never append .md to entries in the sources list — use bare paths like sources/source-slug, not sources/source-slug.md.
 
 2. Always use [[wikilinks]] for cross-references between wiki pages.
    Never use plain markdown links for internal pages.
+   Every wikilink must begin with one of these prefixes:
+     [[entities/slug]], [[concepts/slug]], [[sources/slug]], [[synthesis/slug]]
+   Never write a bare [[slug]] without a prefix.
+   Never wrap [[wikilinks]] in backticks — they must appear as plain text, not inline code.
+   Only create [[wikilinks]] for items you are explicitly given in a related list or
+   instructed to link. Never invent wikilinks for entities or concepts not in that list,
+   even if you recognise them from your training data.
 
 3. Slugs are kebab-case lowercase ASCII (e.g. andrej-karpathy, not Karpathy.md).
    Use the canonical name. Acronyms stay together (rag, llm, not r-a-g).
@@ -87,7 +100,19 @@ Rules:
 - Extract 3-8 key takeaways, each substantive. Include what is novel compared to prior work. 
   Also include any limitations, caveats, or open questions.
 - Extract 2-10 entities (people, organizations, models, products, places mentioned).
-- Extract 2-10 concepts (techniques, ideas, topics discussed).
+  Entities must be proper nouns with a specific, named identity (e.g. GPT-4, OpenAI, Yann LeCun).
+  CRITICAL: Do NOT put algorithms, architectures, techniques, or building blocks in entities — those are concepts.
+  The test: could this be mistaken for a generic type or class of thing? If yes, it is a concept, not an entity.
+  FORBIDDEN as entities (these are always concepts, never entities, no matter what):
+    Transformer, Attention, Self-Attention, Multi-Head Attention, Backpropagation,
+    Wake-Sleep Algorithm, Variational Autoencoder, Diffusion Model, Neural Network,
+    Convolutional Neural Network, Recurrent Neural Network, Language Model,
+    Residual Network, Feed-Forward Network, and any other general architecture or algorithm.
+  Specific named model instances ARE entities only when they have a unique product identity
+  (e.g. GPT-4, DALL-E 3, Gemini 1.5 Pro) — generic architecture names like "Transformer"
+  or "BERT" used as an architectural class are not.
+- Extract 2-10 concepts (techniques, ideas, algorithms, architectures, and topics discussed).
+  Concepts are generic or named ideas, not specific named instances of a product or organization.
 - Slugs must be kebab-case ASCII. For people use last name if unambiguous
   (karpathy, not andrej-karpathy). For concepts use the shortest canonical
   form (rag, not retrieval-augmented-generation — but use the full form in 'name').
@@ -139,7 +164,7 @@ def build_extraction_retry_messages(
 
 NEW_ENTITY_PAGE_TEMPLATE = """Draft a wiki entity page for '{name}'.
 
-This entity was extracted from the source: '{source_title}' (sources/{source_slug}.md)
+This entity was extracted from the source: '{source_title}' (sources/{source_slug})
 
 The source describes it as:
 {description}
@@ -147,14 +172,16 @@ The source describes it as:
 Here are some relevant excerpts from the source:
 {excerpts}
 
-Related entities and concepts also mentioned in this source (use [[wikilinks]] to connect to them):
+Related entities and concepts also mentioned in this source (use prefixed [[wikilinks]] to connect to them):
 {related}
 
 Write a complete markdown page with:
-1. YAML frontmatter (title, type: entity, tags, created: {today}, updated: {today}, sources: ["sources/{source_slug}.md"], confidence)
+1. YAML frontmatter in the --- delimited format described in your instructions (title, type: entity, tags, created: {today}, updated: {today}, sources: ["sources/{source_slug}"], confidence)
 2. An H1 heading matching the title
 3. A 2-3 paragraph body (150-300 words) describing this entity
-4. Use [[wikilinks]] when referencing other entities or concepts from the related list above
+4. Use [[entities/slug]] or [[concepts/slug]] wikilinks ONLY for items explicitly listed
+   in the Related section above. Do not add wikilinks for any other entity or concept,
+   even if mentioned in the excerpts or known from your training data.
 5. End with a '## Sources' section listing [[sources/{source_slug}]]
 
 Do not invent facts. Only use information from the excerpts. Return ONLY the markdown content — no preamble, no code fences.
@@ -163,7 +190,7 @@ Do not invent facts. Only use information from the excerpts. Return ONLY the mar
 
 NEW_CONCEPT_PAGE_TEMPLATE = """Draft a wiki concept page for '{name}'.
 
-This concept was extracted from the source: '{source_title}' (sources/{source_slug}.md)
+This concept was extracted from the source: '{source_title}' (sources/{source_slug})
 
 The source describes it as:
 {description}
@@ -171,16 +198,17 @@ The source describes it as:
 Here are some relevant excerpts from the source:
 {excerpts}
 
-Related entities and concepts also mentioned in this source (use [[wikilinks]] to connect to them):
+Related entities and concepts also mentioned in this source (use prefixed [[wikilinks]] to connect to them):
 {related}
 
 Write a complete markdown page with:
-1. YAML frontmatter (title, type: concept, tags, created: {today}, updated: {today}, sources: ["sources/{source_slug}.md"], confidence)
+1. YAML frontmatter in the --- delimited format described in your instructions (title, type: concept, tags, created: {today}, updated: {today}, sources: ["sources/{source_slug}"], confidence)
 2. An H1 heading matching the title
 3. A 2-4 paragraph body (200-400 words) explaining this concept:
    - What it is
    - Why it matters
-   - How it relates to other concepts/entities (use [[wikilinks]])
+   - How it relates to other concepts/entities (use [[entities/slug]] or [[concepts/slug]] wikilinks
+     ONLY for items explicitly listed in the Related section above)
 4. End with a '## Sources' section listing [[sources/{source_slug}]]
 
 Do not invent facts. Only use information from the excerpts. Return ONLY the markdown content — no preamble, no code fences.
@@ -243,9 +271,11 @@ Update the page by:
    - A new section if the information is substantively new, OR
    - An '## Updates' section if the new info contradicts something in the existing page.
 3. Updating the 'updated:' date in frontmatter to {today}.
-4. Adding "sources/{source_slug}.md" to the 'sources:' list in frontmatter (keep existing entries).
+4. Adding "sources/{source_slug}" to the 'sources:' list in frontmatter (keep existing entries).
 5. Adding [[sources/{source_slug}]] to the '## Sources' section at the bottom.
-6. Keeping any existing [[wikilinks]] intact.
+6. Keeping any existing [[wikilinks]] intact. Do NOT add new [[wikilinks]] for entities or
+   concepts beyond those already present in the existing page — adding a wikilink implies
+   that page exists in the wiki, and you cannot verify that.
 
 Return ONLY the complete updated markdown page — no preamble, no code fences.
 """
@@ -303,7 +333,7 @@ Concept pages created/updated from this source:
 {concept_links}
 
 Write a complete markdown page with:
-1. YAML frontmatter: title, type: source, tags, created: {today}, updated: {today}, file_path, file_type
+1. YAML frontmatter in the --- delimited format described in your instructions: title, type: source, tags, created: {today}, updated: {today}, file_path, file_type
 2. An H1 heading matching the title
 3. A 'Summary' section with the summary paragraph
 4. A 'Key Takeaways' section with the takeaways as bullets

@@ -550,7 +550,7 @@ def ingest_source(
                         "tags": extraction.tags[:3],
                         "created": today,
                         "updated": today,
-                        "sources": [f"sources/{source_slug}.md"],
+                        "sources": [f"sources/{source_slug}"],
                         "confidence": "medium",
                     }
                     parsed_page.body = content
@@ -638,7 +638,7 @@ def ingest_source(
                         "tags": extraction.tags[:3],
                         "created": today,
                         "updated": today,
-                        "sources": [f"sources/{source_slug}.md"],
+                        "sources": [f"sources/{source_slug}"],
                         "confidence": "medium",
                     }
                     parsed_page.body = content
