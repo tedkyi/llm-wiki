@@ -157,7 +157,9 @@ def add_source_to_frontmatter(
     sources = page.frontmatter.get("sources", [])
     if not isinstance(sources, list):
         sources = []
-    ref = f"sources/{source_slug}.md"
+    # Normalize: strip any stale .md suffixes from existing entries
+    sources = [s.removesuffix(".md") if isinstance(s, str) else s for s in sources]
+    ref = f"sources/{source_slug}"
     if ref not in sources:
         sources.append(ref)
     page.frontmatter["sources"] = sources
