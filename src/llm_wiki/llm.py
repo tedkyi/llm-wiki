@@ -132,7 +132,7 @@ class OllamaClient:
             "model": self.model,
             "messages": payload_messages,
             "stream": False,
-            "options": {"temperature": temperature},
+            "options": {"temperature": temperature, "num_predict": 4096},
         }
         if json_mode:
             payload["format"] = "json"
@@ -185,7 +185,7 @@ class OllamaClient:
             "model": self.model,
             "messages": payload_messages,
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": {"temperature": temperature, "num_predict": 4096},
         }
 
         full_content: list[str] = []
