@@ -70,6 +70,10 @@ class WikiPaths:
         return self.internal / STATE_DB
 
     @property
+    def logs(self) -> Path:
+        return self.internal / "logs"
+
+    @property
     def obsidian(self) -> Path:
         return self.wiki / OBSIDIAN_DIR
 
@@ -95,6 +99,7 @@ DEFAULT_CONFIG: dict = {
     "search": {
         "backend": "qmd",
         "rerank": True,
+        "gpu": "auto",  # "auto" | "cuda" | "vulkan" | "metal" | "false"
     },
     "ingest": {
         "interactive": True,
