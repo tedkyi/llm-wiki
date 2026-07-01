@@ -32,7 +32,7 @@ Every wiki page must:
    tags: [tag1, tag2]
    created: YYYY-MM-DD
    updated: YYYY-MM-DD
-   sources: ["sources/source-slug.md"]   # which source pages contributed
+   sources: ["sources/source-slug"]       # which source pages contributed — NO .md extension
    confidence: high | medium | low        # how confident is the synthesis
    ---
    ```

@@ -32,7 +32,7 @@ Every wiki page must:
    tags: [tag1, tag2]
    created: YYYY-MM-DD
    updated: YYYY-MM-DD
-   sources: ["sources/source-slug.md"]   # which source pages contributed
+   sources: ["sources/source-slug"]       # which source pages contributed — NO .md extension
    confidence: high | medium | low        # how confident is the synthesis
    ---
    ```
@@ -145,6 +145,7 @@ Always `YYYY-MM-DD` (ISO 8601 calendar date). No times.
 - ❌ **Never invent citations.** If you don't know which source supports a
   claim, mark it `confidence: low` and leave the source field empty.
 - ❌ **Never use plain markdown links** between wiki pages. Use `[[wikilinks]]`.
+- ❌ **Never append `.md` to entries in the `sources` frontmatter field.** Use the bare path, e.g. `sources/source-slug`, not `sources/source-slug.md`.
 
 ---
 
