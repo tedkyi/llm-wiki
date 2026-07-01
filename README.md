@@ -1,14 +1,9 @@
 # LLM-Wiki
 
-> A local, LLM-maintained personal knowledge base. Drop documents in, watch an LLM compile them into a living, interlinked Obsidian wiki you can search and query.
+> A local, LLM-maintained personal knowledge base, focused on understanding research papers. Drop documents in, watch an LLM compile them into a living, interlinked Obsidian wiki you can search and query.
 
 Feel free to fork and don't forget to give it a Star ⭐️ for better reach!
 
--------------------------
-Hello, I'm Nihar Shrotri, working as an AI Consultant.
-I'm currently pursuing my PhD in Artificial Intelligence and Machine Learning
-
-Let's connect on LinkedIn for a Chat: https://www.linkedin.com/in/niharshrotri/
 -------------------------
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -47,7 +42,7 @@ Every ingest produces a cluster of `sources/`, `entities/`, and `concepts/` page
 
 ### Core capabilities
 - **Incremental ingest** — drop a file, run `wiki ingest`, get 8–15 cross-linked wiki pages
-- **Structured extraction** — Qwen3 identifies entities (people, orgs, models), concepts, and key takeaways per source
+- **Structured extraction** — Qwen3 identifies entities (people, organizations, places), concepts (models, techniques, architectures, ideas), and key takeaways per source, always framed around the problem being solved and its limitations
 - **Smart merging** — re-ingesting related sources updates existing entity/concept pages instead of overwriting them, preserving provenance
 - **Hybrid search** — BM25 full-text + vector embeddings + LLM reranking (all local, via [QMD](https://github.com/tobi/qmd))
 - **3-way query scope** — `Wiki` (thematic answers from LLM-compiled pages), `Raw` (exact lookups in original documents), or `Hybrid` (both)
@@ -99,13 +94,13 @@ Three layers, per Karpathy:
 - **`raw/`** — your source documents. Immutable. The agent reads but never modifies.
 - **`wiki/`** — LLM-maintained markdown. One folder per page type (`sources/`, `entities/`, `concepts/`, `synthesis/`) plus auto-generated `index.md` and `log.md`. Open this in Obsidian.
 - **`schema/AGENTS.md`** — the conventions file. Tells the LLM how to format pages, when to merge vs create, how to cite, how to handle contradictions. Edit as your preferences evolve.
-- **`.wiki/`** — internal state: SQLite ingest history, QMD search index, config. Git-ignored.
+- **`.wiki/`** — internal state: SQLite ingest history, QMD search index, config, and per-source diagnostic logs (`.wiki/logs/`). Git-ignored.
 
 ### The ingest pipeline
 
 Each source goes through three LLM passes:
 
-1. **Extraction** (thinking mode on) — Qwen3 reads the source and returns structured JSON: summary, key takeaways, named entities, concepts, tags.
+1. **Extraction** (thinking mode on) — Qwen3 reads the source and returns structured JSON: a summary that leads with the problem being solved, key takeaways (including what's novel and what's limited), named entities (people, organizations, places only), concepts (models, techniques, architectures, and other ideas), tags. LLM calls retry automatically once after a 5s backoff on failure, and a per-source diagnostic log is written to `.wiki/logs/` for troubleshooting.
 2. **Page drafting** (streaming, thinking mode off) — one call per entity/concept. Draft a new page from scratch, or *merge* new information into an existing page (preserving prior content, updating dates, appending to `sources:` frontmatter).
 3. **Source summary** — write the `sources/<slug>.md` page listing every wiki page touched by this source for provenance.
 
@@ -136,7 +131,8 @@ No cloud services. No API keys. No data leaves your machine.
 
 - **Python 3.11+**
 - **Node.js 18+** (for QMD)
-- **Ollama** with the `qwen3:14b` model pulled (~9.3GB)
+- **Ollama** with the `qwen3:14b` model pulled (~9.3GB). 
+  You can specify your preferred model in `config.yml`.
 - **QMD** (`npm install -g @tobilu/qmd`)
 - **Homebrew SQLite** on macOS (`brew install sqlite`)
 - **~15GB free disk space** for models and embeddings
@@ -208,6 +204,7 @@ open wiki/   # then "Open folder as vault"
 | `wiki sources show <id>` | Show metadata + text preview for one source |
 | `wiki sources rm <id>` | Remove a source from tracking |
 | `wiki ingest [source_id]` | Run the 3-pass LLM ingest pipeline |
+| `wiki reingest <source_id>` | Reset a source to `pending` so the next `wiki ingest` reprocesses it |
 | `wiki query "<question>" [--scope wiki\|raw\|hybrid] [--save-as <slug>]` | Search + synthesize a cited answer |
 | `wiki reindex` | Force rebuild of the QMD search index |
 | `wiki lint [--deep] [--fix]` | Health-check the wiki |
@@ -233,28 +230,26 @@ Summary:
   The latest version, Qwen3, introduces a thinking mode designed to enhance
   performance on complex reasoning tasks.
 
-Entities (3):
+Entities (1):
   + alibaba-cloud (organization)  Alibaba Cloud
-  + qwen (product)                Qwen
-  + qwen3 (product)               Qwen3
 
-Concepts (2):
-  + large-language-models                 Large Language Models
+Concepts (3):
+  + qwen                                  Qwen
+  + qwen3                                 Qwen3
   + thinking-mode-for-complex-reasoning   Thinking Mode for Complex Reasoning
 
-File these? Will create/update ~6 wiki pages. [Y/n]: Y
+File these? Will create/update ~5 wiki pages. [Y/n]: Y
 
 created entity alibaba-cloud
-created entity qwen
-created entity qwen3
-created concept large-language-models
+created concept qwen
+created concept qwen3
 created concept thinking-mode-for-complex-reasoning
 created source  quick-notes-on-qwen
 
-✓ Ingested Quick Notes on Qwen — 6 created, 0 updated
+✓ Ingested Quick Notes on Qwen — 5 created, 0 updated
 ```
 
-That's **6 cross-linked pages from a 28-word input**, each with YAML frontmatter, `[[wikilinks]]` between them, and provenance back to the source. Open Obsidian's graph view and you'll see the cluster light up.
+That's **5 cross-linked pages from a 28-word input**, each with YAML frontmatter, `[[wikilinks]]` between them, and provenance back to the source. Open Obsidian's graph view and you'll see the cluster light up.
 
 A real query against 11 ingested pages:
 
@@ -331,7 +326,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v0.8.1** — production-ready for personal use.
+**Current version: v0.9.1** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -343,10 +338,13 @@ Every claim is cited. Every citation points to a page that actually exists.
 | 6 | FastAPI + HTMX web UI (7 pages: Dashboard, Sources, Ingest, Jobs, Query, Lint, Graph) | ✅ Done |
 | 7 (v0.7.0) | Source CRUD, intent classification, 3-way scope toggle | ✅ Done |
 | 8 (v0.8.0) | Persistent ingest jobs (survive tab close, server restart) | ✅ Done |
-| 8.1 | Auto-reindex after ingest and lint | ✅ Done |
+| 9 (v0.9.0) | Focus on research problem and limitations. Proper extraction JSON and document formatting. Auto-reindex after ingest and lint (BM25 updates immediately, vector embeddings build in the background) | ✅ Done |
+| 9.1 (v0.9.1) | `wiki reingest`, stabilize with retry-with-backoff, per-source diagnostic logs | ✅ Done |
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)
+- Cloud API, if preferred over local model
+- Better graph and community detection support
 - Dashboard showing live active-job count
 - Static HTML export for sharing the wiki
 - Multi-user / team features

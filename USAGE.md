@@ -201,11 +201,9 @@ Re-ingesting **merges into existing wiki pages** rather than duplicating them.
 
 #### CLI
 
-There's no dedicated re-ingest command in the CLI yet, but you can achieve the same by:
-
 ```bash
-# Mark it as pending via SQL (temporary workaround)
-sqlite3 .wiki/state.sqlite "UPDATE sources SET status='pending' WHERE id=3;"
+# Reset the source to "pending"
+wiki reingest 3
 
 # Then run ingest on that one source
 wiki ingest 3
@@ -222,7 +220,7 @@ Three ways to explore what's in your wiki:
 Open `http://127.0.0.1:8000/graph`. You'll see all pages as nodes, color-coded:
 
 - 🟣 **Purple** — sources (your original documents)
-- 🟠 **Orange** — entities (people, organizations, products)
+- 🟠 **Orange** — entities (people, organizations, places)
 - 🟢 **Green** — concepts (ideas, techniques, theories)
 - 🌸 **Pink** — synthesis pages (saved answers)
 
@@ -328,6 +326,8 @@ wiki ingest                             # Interactive — prompts for each pendi
 wiki ingest --batch                     # Non-interactive — processes all pending sources
 wiki ingest 3                           # Ingest a specific source by ID
 wiki ingest --dry-run                   # Show what would be done without doing it
+wiki ingest --no-verbose-log            # Skip per-source diagnostic logs in .wiki/logs/ (on by default)
+wiki reingest 3                         # Reset source 3 to "pending" so the next ingest reprocesses it
 ```
 
 ### Querying the wiki
@@ -410,6 +410,18 @@ If it's still `pending` after a long time (>20 min for a PDF), the ingest genuin
 ```bash
 # Ctrl+C the wiki serve terminal
 wiki serve
+```
+
+### An ingest failed or a source's extraction looks wrong
+
+Every `wiki ingest` run writes a per-source diagnostic log to `.wiki/logs/` (raw LLM
+responses, timings, retries, errors) — on by default, disable with `--no-verbose-log`. Failed
+LLM calls are retried automatically once after a 5s backoff before the ingest is marked
+`error`. Check the latest log there before re-running:
+
+```bash
+ls .wiki/logs/
+wiki reingest 3   # then wiki ingest 3
 ```
 
 ### Query answers "the sources don't contain this info" for a fact I know is in a document

@@ -14,8 +14,8 @@
 │   ├── index.md       ← Auto-maintained catalog of every wiki page.
 │   ├── log.md         ← Append-only chronological history.
 │   ├── sources/       ← One summary page per ingested source.
-│   ├── entities/      ← People, places, organizations, models, products.
-│   ├── concepts/      ← Topics, techniques, theories, ideas.
+│   ├── entities/      ← People, places, organizations — proper nouns with a named identity.
+│   ├── concepts/      ← Topics, techniques, theories, ideas, models, and architectures.
 │   └── synthesis/     ← Overview pages, comparisons, evolving theses.
 └── schema/AGENTS.md   ← This file.
 ```
@@ -39,7 +39,11 @@ Every wiki page must:
 
 2. **Use `[[wikilinks]]`** for every cross-reference. Never plain markdown
    links for pages inside the wiki. Wikilinks are what make the Obsidian graph
-   view work.
+   view work. Every wikilink must carry a type prefix — `[[entities/slug]]`,
+   `[[concepts/slug]]`, `[[sources/slug]]`, or `[[synthesis/slug]]` — never a
+   bare `[[slug]]`, and never wrapped in backticks. Only link to pages that
+   are explicitly known to exist (e.g. given in a related-pages list); never
+   invent a wikilink from general knowledge.
 
 3. **Cite sources** for every non-trivial claim using a footnote-style anchor:
    `Karpathy proposed the LLM-Wiki pattern in 2026[^source-llm-wiki-gist]`,
@@ -57,13 +61,15 @@ author, date, URL/path), 3–8 bullet key takeaways, a "Related pages" section
 listing every entity/concept page touched by this source.
 
 ### `entities/<slug>.md`
-A page about a single named thing (person, lab, model, product, place).
-Sections: brief description, key facts, relationships (`[[wikilinks]]` to
-related entities), references back to source pages.
+A page about a single named thing — a person, organization, or place, not a
+model, product, or technique (those are concepts). Sections: brief
+description, key facts, relationships (`[[wikilinks]]` to related entities),
+references back to source pages.
 
 ### `concepts/<slug>.md`
-A page about an idea, technique, or topic. Sections: definition, why it
-matters, key examples, related concepts, source references.
+A page about an idea, technique, model, architecture, or topic. Sections:
+definition, why it matters, key examples, related concepts, source
+references.
 
 ### `synthesis/<slug>.md`
 Overview pages, comparisons, the "evolving thesis." These are higher-order
@@ -145,6 +151,9 @@ Always `YYYY-MM-DD` (ISO 8601 calendar date). No times.
 - ❌ **Never invent citations.** If you don't know which source supports a
   claim, mark it `confidence: low` and leave the source field empty.
 - ❌ **Never use plain markdown links** between wiki pages. Use `[[wikilinks]]`.
+- ❌ **Never append `.md` to entries in the `sources` frontmatter field.** Use the bare path, e.g. `sources/source-slug`, not `sources/source-slug.md`.
+- ❌ **Never wrap frontmatter in a ` ```yaml ` code fence.** The `---` delimiters shown in §2 are the only correct format.
+- ❌ **Never write a bare `[[slug]]` wikilink or wrap one in backticks.** Every wikilink needs its type prefix (`entities/`, `concepts/`, `sources/`, `synthesis/`) as plain text.
 
 ---
 
