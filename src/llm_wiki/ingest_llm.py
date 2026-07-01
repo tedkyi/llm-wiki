@@ -38,7 +38,7 @@ from .llm import (
 )
 
 
-MAX_SOURCE_CHARS = 100_000  # ~25K tokens roughly
+MAX_SOURCE_CHARS = 60_000   # ~15K tokens — leaves headroom for prompt + output
 EXCERPT_CHARS = 4000        # how much of the source we include in draft prompts
 
 
@@ -551,9 +551,11 @@ def ingest_source(
     # Truncate very long sources
     source_text = parsed.text
     if len(source_text) > MAX_SOURCE_CHARS:
+        original_chars = len(source_text)
         source_text = source_text[:MAX_SOURCE_CHARS] + "\n\n[... truncated ...]"
+        logger.info(f"TRUNCATED: {original_chars} chars → {MAX_SOURCE_CHARS} (dropped {original_chars - MAX_SOURCE_CHARS} chars)")
 
-    logger.info(f"parsed  : title={parsed.title!r}, file_type={parsed.file_type}, chars={len(source_text)}")
+    logger.info(f"parsed  : title={parsed.title!r}, file_type={parsed.file_type}, chars={len(parsed.text)}")
 
     # 3. Pass 1 — extraction
     callbacks.on_extracting()
@@ -567,6 +569,7 @@ def ingest_source(
             thinking=thinking_for_extraction,
             json_mode=True,
             temperature=0.3,
+            num_predict=None,
         )
     except (OllamaNotRunning, ModelNotFound) as e:
         logger.info(f"ERROR (Ollama unreachable): {e}")
@@ -595,6 +598,7 @@ def ingest_source(
                 thinking=thinking_for_extraction,
                 json_mode=True,
                 temperature=0.3,
+                num_predict=None,
             )
         except LLMError as e2:
             logger.info(f"ERROR (LLM): {e2}")
@@ -638,6 +642,7 @@ def ingest_source(
                 thinking=False,  # retry without thinking, faster
                 json_mode=True,
                 temperature=0.2,
+                num_predict=None,
             )
             _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
             logger.info(f"LLM call end: {_elapsed:.1f}s, {len(retry_response)} chars")
