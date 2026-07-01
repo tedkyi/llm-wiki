@@ -371,6 +371,12 @@ def sources_list_cmd(
         "-s",
         help="Only show sources with this status (pending|ingested|error).",
     ),
+    tail: int = typer.Option(
+        None,
+        "--tail",
+        "-n",
+        help="Only show the last N sources.",
+    ),
 ) -> None:
     """List all tracked sources."""
     paths = _resolve_root_or_die()
@@ -385,8 +391,12 @@ def sources_list_cmd(
             _hint("Add one with [bold]wiki add <file>[/bold]")
         return
 
+    total = len(rows)
+    if tail is not None:
+        rows = rows[-tail:]
+
     table = Table(
-        title=f"Sources ({len(rows)})",
+        title=f"Sources ({len(rows)} of {total})" if tail is not None else f"Sources ({total})",
         show_header=True,
         header_style="bold",
         row_styles=["", "dim"],
