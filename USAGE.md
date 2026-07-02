@@ -312,6 +312,7 @@ wiki add *.md                           # Add with glob
 wiki sources list                       # All sources
 wiki sources list --status pending      # Only unprocessed
 wiki sources list --status ingested     # Only processed
+wiki sources list --tail 20             # Only the last 20 sources
 wiki sources show 3                     # Details for source ID 3
 
 # Remove
