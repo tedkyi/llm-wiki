@@ -234,9 +234,19 @@ def status() -> None:
     cfg_table.add_column()
     llm = config.get("llm", {})
     search_cfg = config.get("search", {})
-    cfg_table.add_row("LLM provider", llm.get("provider", "?"))
-    cfg_table.add_row("LLM model", llm.get("model", "?"))
-    cfg_table.add_row("LLM host", llm.get("host", "?"))
+    ingest_cfg = config.get("ingest", {})
+    cfg_table.add_row(
+        "LLM defaults",
+        "[dim]below — per-task overrides in llm.tasks (config.yml) not shown[/dim]",
+    )
+    cfg_table.add_row("  provider", llm.get("provider", "?"))
+    cfg_table.add_row("  model", llm.get("model", "?"))
+    cfg_table.add_row("  host", llm.get("host", "?"))
+    cfg_table.add_row("  temperature", str(llm.get("temperature", "?")))
+    cfg_table.add_row("  top_k / top_p", f"{llm.get('top_k', '?')} / {llm.get('top_p', '?')}")
+    cfg_table.add_row("  num_ctx", str(llm.get("num_ctx", "?")))
+    cfg_table.add_row("  num_predict", str(llm.get("num_predict", "?")))
+    cfg_table.add_row("Max source chars", str(ingest_cfg.get("max_source_chars", "?")))
     cfg_table.add_row("Search backend", search_cfg.get("backend", "?"))
     cfg_table.add_row("Reranking", "on" if search_cfg.get("rerank") else "off")
     # Show QMD binary availability
@@ -699,6 +709,8 @@ def ingest(
     paths = _resolve_root_or_die()
     config = cfg.load_config(paths)
     llm_cfg = config.get("llm", {})
+    ingest_cfg = config.get("ingest", {})
+    max_source_chars = ingest_cfg.get("max_source_chars", ingest_llm.MAX_SOURCE_CHARS)
 
     host = llm_cfg.get("host", "http://localhost:11434")
     model = llm_cfg.get("model", "qwen3:14b")
@@ -733,6 +745,8 @@ def ingest(
                 source_id,
                 client,
                 cb,
+                llm_cfg=llm_cfg,
+                max_source_chars=max_source_chars,
                 mode=mode,
                 thinking_for_extraction=thinking,
                 verbose_log=verbose_log,
@@ -744,6 +758,8 @@ def ingest(
                 paths,
                 client,
                 lambda: CliIngestCallbacks(mode=mode),
+                llm_cfg=llm_cfg,
+                max_source_chars=max_source_chars,
                 mode=mode,
                 auto_discover=not no_discover,
                 thinking_for_extraction=thinking,
@@ -1008,6 +1024,7 @@ def query(
             min_score=min_score,
             rerank=not no_rerank,
             save_as=save_as,
+            llm_cfg=llm_cfg,
             scope=scope,
             classify_intent_first=not no_intent_classify,
         )
@@ -1150,6 +1167,7 @@ def lint(
 
     # If --deep, verify Ollama up front
     client: Optional[OllamaClient] = None
+    llm_cfg: dict = {}
     if deep:
         config = cfg.load_config(paths)
         llm_cfg = config.get("llm", {})
@@ -1171,7 +1189,7 @@ def lint(
         else:
             console.print("[dim]Running fast checks…[/dim]")
 
-        report = lint_module.run_lint(paths, deep=deep, client=client)
+        report = lint_module.run_lint(paths, deep=deep, client=client, llm_cfg=llm_cfg)
     finally:
         if client is not None:
             client.close()

@@ -410,6 +410,9 @@ class JobManager:
             return
         config = cfg.load_config(self.paths)
         llm_cfg = config.get("llm", {})
+        max_source_chars = config.get("ingest", {}).get(
+            "max_source_chars", ingest_llm.MAX_SOURCE_CHARS
+        )
         client = OllamaClient(
             host=llm_cfg.get("host", "http://localhost:11434"),
             model=llm_cfg.get("model", "qwen3:14b"),
@@ -444,7 +447,12 @@ class JobManager:
 
             callbacks = _JobCallbacks(self.paths, job_id)
             ingest_llm.ingest_source(
-                self.paths, job.source_id, client, callbacks=callbacks
+                self.paths,
+                job.source_id,
+                client,
+                callbacks=callbacks,
+                llm_cfg=llm_cfg,
+                max_source_chars=max_source_chars,
             )
             # Prune after each successful job to keep the jobs list short
             try:

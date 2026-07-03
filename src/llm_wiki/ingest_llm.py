@@ -35,6 +35,7 @@ from .llm import (
     ModelNotFound,
     OllamaClient,
     OllamaNotRunning,
+    resolve_llm_options,
 )
 
 
@@ -451,11 +452,13 @@ def _stream_with_retry(
     callbacks: "IngestCallbacks",
     logger: "_IngestLogger | _NoopLogger",
     label: str,
+    llm_cfg: dict | None = None,
 ) -> tuple[str, float]:
     """Stream an LLM response, retrying once after 5 s on any LLMError.
 
     Returns (full_content, elapsed_seconds_of_final_successful_call).
     """
+    draft_options = resolve_llm_options(llm_cfg or {}, task="draft")
     for attempt in range(2):
         if attempt == 1:
             logger.info(f"LLM call failed for {label}; sleeping 5s before retry…")
@@ -464,7 +467,7 @@ def _stream_with_retry(
         _t0 = datetime.now(timezone.utc)
         try:
             full = ""
-            gen = client.chat_stream(messages, thinking=False, temperature=0.3)
+            gen = client.chat_stream(messages, thinking=False, **draft_options)
             try:
                 while True:
                     chunk = next(gen)
@@ -491,11 +494,15 @@ def ingest_source(
     client: OllamaClient,
     callbacks: IngestCallbacks,
     *,
+    llm_cfg: dict | None = None,
+    max_source_chars: int | None = None,
     mode: str = "interactive",
     thinking_for_extraction: bool = True,
     verbose_log: bool = True,
 ) -> IngestResult:
     """Run the full 3-pass ingest pipeline on a single source."""
+    llm_cfg = llm_cfg or {}
+    max_source_chars = max_source_chars if max_source_chars is not None else MAX_SOURCE_CHARS
     started = _now_iso()
 
     # Set up verbose logger — created before any early returns so all paths can close it
@@ -550,10 +557,10 @@ def ingest_source(
 
     # Truncate very long sources
     source_text = parsed.text
-    if len(source_text) > MAX_SOURCE_CHARS:
+    if len(source_text) > max_source_chars:
         original_chars = len(source_text)
-        source_text = source_text[:MAX_SOURCE_CHARS] + "\n\n[... truncated ...]"
-        logger.info(f"TRUNCATED: {original_chars} chars → {MAX_SOURCE_CHARS} (dropped {original_chars - MAX_SOURCE_CHARS} chars)")
+        source_text = source_text[:max_source_chars] + "\n\n[... truncated ...]"
+        logger.info(f"TRUNCATED: {original_chars} chars → {max_source_chars} (dropped {original_chars - max_source_chars} chars)")
 
     logger.info(f"parsed  : title={parsed.title!r}, file_type={parsed.file_type}, chars={len(parsed.text)}")
 
@@ -561,15 +568,15 @@ def ingest_source(
     callbacks.on_extracting()
     extraction_messages = prompts.build_extraction_messages(parsed.title, source_text)
     logger.section("PASS 1 — EXTRACTION")
-    logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, temperature=0.3")
+    extraction_options = resolve_llm_options(llm_cfg, task="extraction")
+    logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, options={extraction_options}")
     _t0 = datetime.now(timezone.utc)
     try:
         raw_response = client.chat(
             extraction_messages,
             thinking=thinking_for_extraction,
             json_mode=True,
-            temperature=0.3,
-            num_predict=None,
+            **extraction_options,
         )
     except (OllamaNotRunning, ModelNotFound) as e:
         logger.info(f"ERROR (Ollama unreachable): {e}")
@@ -590,15 +597,14 @@ def ingest_source(
         logger.section("PASS 1 — EXTRACTION RETRY")
         logger.info("Sleeping 5s before retry…")
         time.sleep(5)
-        logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, temperature=0.3")
+        logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, options={extraction_options}")
         _t0 = datetime.now(timezone.utc)
         try:
             raw_response = client.chat(
                 extraction_messages,
                 thinking=thinking_for_extraction,
                 json_mode=True,
-                temperature=0.3,
-                num_predict=None,
+                **extraction_options,
             )
         except LLMError as e2:
             logger.info(f"ERROR (LLM): {e2}")
@@ -631,7 +637,8 @@ def ingest_source(
         logger.section("PASS 1 — EXTRACTION RETRY")
         logger.info("Sleeping 5s before retry…")
         time.sleep(5)
-        logger.info("LLM call start: thinking=False, json_mode=True, temperature=0.2")
+        retry_options = resolve_llm_options(llm_cfg, task="extraction_retry")
+        logger.info(f"LLM call start: thinking=False, json_mode=True, options={retry_options}")
         _t0 = datetime.now(timezone.utc)
         try:
             retry_messages = prompts.build_extraction_retry_messages(
@@ -641,8 +648,7 @@ def ingest_source(
                 retry_messages,
                 thinking=False,  # retry without thinking, faster
                 json_mode=True,
-                temperature=0.2,
-                num_predict=None,
+                **retry_options,
             )
             _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
             logger.info(f"LLM call end: {_elapsed:.1f}s, {len(retry_response)} chars")
@@ -765,7 +771,7 @@ def ingest_source(
                 logger.info("Sleeping 1s before LLM call…")
                 time.sleep(1)
                 logger.info("LLM call start: thinking=False, temperature=0.3")
-                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"entity {slug}")
+                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"entity {slug}", llm_cfg)
                 logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
                 logger.raw(f"ENTITY {slug}", full)
 
@@ -853,7 +859,7 @@ def ingest_source(
                 logger.info("Sleeping 1s before LLM call…")
                 time.sleep(1)
                 logger.info("LLM call start: thinking=False, temperature=0.3")
-                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"concept {slug}")
+                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"concept {slug}", llm_cfg)
                 logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
                 logger.raw(f"CONCEPT {slug}", full)
 
@@ -922,7 +928,7 @@ def ingest_source(
             logger.info("Sleeping 1s before LLM call…")
             time.sleep(1)
             logger.info("LLM call start: thinking=False, temperature=0.3")
-            full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"source page {source_slug}")
+            full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"source page {source_slug}", llm_cfg)
             logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
             logger.raw(f"SOURCE PAGE {source_slug}", full)
 
@@ -1026,6 +1032,8 @@ def ingest_pending(
     client: OllamaClient,
     callbacks_factory: Callable[[], IngestCallbacks],
     *,
+    llm_cfg: dict | None = None,
+    max_source_chars: int | None = None,
     mode: str = "interactive",
     auto_discover: bool = True,
     thinking_for_extraction: bool = True,
@@ -1061,6 +1069,8 @@ def ingest_pending(
             sid,
             client,
             cb,
+            llm_cfg=llm_cfg,
+            max_source_chars=max_source_chars,
             mode=mode,
             thinking_for_extraction=thinking_for_extraction,
             verbose_log=verbose_log,

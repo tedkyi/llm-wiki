@@ -22,6 +22,22 @@ DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:14b"
 DEFAULT_TIMEOUT = 300.0  # 5 minutes — thinking-mode extraction can be slow
 
+_OPTION_KEYS = ("temperature", "top_k", "top_p", "min_p", "num_ctx", "num_predict")
+
+
+def resolve_llm_options(llm_cfg: dict, task: str | None = None, **overrides) -> dict:
+    """Build an Ollama `options` dict from config, layering task and call-site overrides.
+
+    Precedence (lowest to highest): base `llm` sampling defaults, then
+    `llm.tasks.<task>`, then any explicit non-None keyword overrides.
+    """
+    options = {k: llm_cfg[k] for k in _OPTION_KEYS if k in llm_cfg}
+    if task:
+        task_cfg = llm_cfg.get("tasks", {}).get(task, {})
+        options.update({k: v for k, v in task_cfg.items() if k in _OPTION_KEYS})
+    options.update({k: v for k, v in overrides.items() if v is not None})
+    return options
+
 
 class LLMError(Exception):
     """Raised when an LLM call fails in a user-recoverable way."""
@@ -120,18 +136,33 @@ class OllamaClient:
         *,
         thinking: bool = False,
         json_mode: bool = False,
-        temperature: float = 0.3,
-        num_predict: int | None = 8192,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        min_p: float | None = None,
+        num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> str:
         """Non-streaming chat. Returns the full assistant message content.
 
         For Qwen3, thinking mode is controlled via /think and /no_think
-        inline tags in the last user message.
+        inline tags in the last user message. Sampling params default to
+        None (omitted from the request) — callers should resolve them from
+        config via `resolve_llm_options` rather than relying on client-side
+        defaults.
         """
         payload_messages = self._prepare_messages(messages, thinking=thinking)
-        options: dict = {"temperature": temperature}
-        if num_predict is not None:
-            options["num_predict"] = num_predict
+        options: dict = {}
+        for key, value in (
+            ("temperature", temperature),
+            ("top_k", top_k),
+            ("top_p", top_p),
+            ("min_p", min_p),
+            ("num_ctx", num_ctx),
+            ("num_predict", num_predict),
+        ):
+            if value is not None:
+                options[key] = value
         payload = {
             "model": self.model,
             "messages": payload_messages,
@@ -172,8 +203,12 @@ class OllamaClient:
         messages: list[ChatMessage],
         *,
         thinking: bool = False,
-        temperature: float = 0.3,
-        num_predict: int | None = 8192,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        min_p: float | None = None,
+        num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> Generator[str, None, str]:
         """Streaming chat. Yields content chunks as they arrive.
 
@@ -186,9 +221,17 @@ class OllamaClient:
                 return full
         """
         payload_messages = self._prepare_messages(messages, thinking=thinking)
-        options: dict = {"temperature": temperature}
-        if num_predict is not None:
-            options["num_predict"] = num_predict
+        options: dict = {}
+        for key, value in (
+            ("temperature", temperature),
+            ("top_k", top_k),
+            ("top_p", top_p),
+            ("min_p", min_p),
+            ("num_ctx", num_ctx),
+            ("num_predict", num_predict),
+        ):
+            if value is not None:
+                options[key] = value
         payload = {
             "model": self.model,
             "messages": payload_messages,
