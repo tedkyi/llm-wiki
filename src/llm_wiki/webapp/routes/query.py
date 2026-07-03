@@ -144,6 +144,7 @@ async def query_stream(
                     min_score=0.0,
                     rerank=True,
                     save_as=None,
+                    llm_cfg=llm_cfg,
                     scope=scope,
                     classify_intent_first=True,
                 )

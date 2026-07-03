@@ -560,6 +560,8 @@ def check_contradictions_deep(
     paths: cfg.WikiPaths,
     client,  # OllamaClient
     max_pairs: int = 10,
+    *,
+    llm_cfg: dict | None = None,
 ) -> list[LintIssue]:
     """Use Qwen3 to scan pairs of pages that share entities/concepts and
     flag potentially contradictory claims.
@@ -567,10 +569,11 @@ def check_contradictions_deep(
     This is slow — one LLM call per pair of pages. We limit to `max_pairs`
     to keep the runtime bounded.
     """
-    from .llm import ChatMessage, LLMError
+    from .llm import ChatMessage, LLMError, resolve_llm_options
     from .prompts import CONTRADICTION_DETECTION_PROMPT
 
     issues: list[LintIssue] = []
+    contradiction_options = resolve_llm_options(llm_cfg or {}, task="contradiction")
 
     # 1. Identify pairs of pages that share outgoing wikilinks
     page_link_sets: dict[str, set[str]] = {}
@@ -611,7 +614,7 @@ def check_contradictions_deep(
         ]
 
         try:
-            response = client.chat(messages, thinking=False, temperature=0.2)
+            response = client.chat(messages, thinking=False, **contradiction_options)
         except LLMError:
             continue
 
@@ -773,6 +776,7 @@ def run_lint(
     *,
     deep: bool = False,
     client=None,  # OllamaClient, required if deep=True
+    llm_cfg: dict | None = None,
 ) -> LintReport:
     """Run all fast checks, plus deep checks if requested.
 
@@ -803,7 +807,7 @@ def run_lint(
     # Deep check (LLM-powered)
     if deep and client is not None:
         report.deep_check_run = True
-        report.issues.extend(check_contradictions_deep(inv, paths, client))
+        report.issues.extend(check_contradictions_deep(inv, paths, client, llm_cfg=llm_cfg))
 
     # Sort: errors first, then warnings, then infos. Within each, by page.
     severity_order = {

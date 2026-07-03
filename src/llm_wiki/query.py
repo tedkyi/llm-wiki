@@ -28,6 +28,7 @@ from .llm import (
     ModelNotFound,
     OllamaClient,
     OllamaNotRunning,
+    resolve_llm_options,
 )
 
 
@@ -234,7 +235,7 @@ def run_query(
     min_score: float = 0.0,
     rerank: bool = True,
     save_as: str | None = None,
-    temperature: float = 0.3,
+    llm_cfg: dict | None = None,
     scope: str = "wiki",  # 'wiki' | 'raw' | 'hybrid'
     classify_intent_first: bool = True,
 ) -> QueryResult:
@@ -250,17 +251,18 @@ def run_query(
     respond conversationally.
     """
     callbacks.on_start(question, mode)
+    llm_cfg = llm_cfg or {}
 
     # 0. Intent classification — skip retrieval for chitchat
     if classify_intent_first:
         from . import intent as intent_module
 
         callbacks.on_classifying_intent()
-        intent_result = intent_module.classify_intent(client, question)
+        intent_result = intent_module.classify_intent(client, question, llm_cfg=llm_cfg)
         callbacks.on_intent_classified(intent_result.intent)
 
         if intent_result.intent == "chitchat":
-            reply = intent_module.generate_chitchat_reply(client, question)
+            reply = intent_module.generate_chitchat_reply(client, question, llm_cfg=llm_cfg)
             callbacks.on_chitchat_reply(reply)
             result = QueryResult(question=question, answer=reply, hits=[])
             callbacks.on_complete(result)
@@ -321,7 +323,8 @@ def run_query(
 
     answer_parts: list[str] = []
     try:
-        gen = client.chat_stream(messages, thinking=False, temperature=temperature)
+        synthesis_options = resolve_llm_options(llm_cfg, task="synthesis")
+        gen = client.chat_stream(messages, thinking=False, **synthesis_options)
         try:
             while True:
                 chunk = next(gen)

@@ -92,9 +92,25 @@ DEFAULT_CONFIG: dict = {
         "provider": "ollama",
         "model": "qwen3:14b",
         "host": "http://localhost:11434",
-        "temperature": 0.3,
         # Qwen3 thinking mode — useful for synthesis/lint, slower for routine ops
         "thinking": True,
+        # Base sampling defaults, used unless a task below overrides them
+        "temperature": 0.3,
+        "top_k": 40,
+        "top_p": 0.9,
+        "min_p": 0.0,
+        "num_ctx": 131072,
+        "num_predict": 8192,
+        # Sparse per-task overrides, merged over the base settings above
+        "tasks": {
+            "extraction": {"num_predict": -1},
+            "extraction_retry": {"temperature": 0.2, "num_predict": -1},
+            "draft": {},
+            "synthesis": {},
+            "intent_classify": {"temperature": 0.0},
+            "chitchat": {"temperature": 0.7},
+            "contradiction": {"temperature": 0.2},
+        },
     },
     "search": {
         "backend": "qmd",
@@ -105,19 +121,34 @@ DEFAULT_CONFIG: dict = {
         "interactive": True,
         "auto_update_index": True,
         "auto_update_log": True,
+        # Sources longer than this are truncated before being sent to the LLM
+        "max_source_chars": 60_000,
     },
 }
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge `override` onto `base`, without mutating either."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def load_config(paths: WikiPaths) -> dict:
-    """Load the wiki's config.yml, falling back to defaults for missing keys."""
+    """Load the wiki's config.yml, falling back to defaults for missing keys.
+
+    Nested dicts (e.g. `llm`, `llm.tasks`) are merged key-by-key so a partial
+    override in config.yml doesn't drop unrelated defaults.
+    """
     if not paths.config_file.exists():
         return dict(DEFAULT_CONFIG)
     with paths.config_file.open("r", encoding="utf-8") as f:
         loaded = yaml.safe_load(f) or {}
-    merged = dict(DEFAULT_CONFIG)
-    merged.update(loaded)
-    return merged
+    return _deep_merge(DEFAULT_CONFIG, loaded)
 
 
 def save_config(paths: WikiPaths, config: dict) -> None:

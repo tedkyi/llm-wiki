@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .llm import ChatMessage, LLMError, OllamaClient
+from .llm import ChatMessage, LLMError, OllamaClient, resolve_llm_options
 
 
 INTENT_SYSTEM_PROMPT = """You are an intent classifier for a personal knowledge \
@@ -62,6 +62,7 @@ def classify_intent(
     client: OllamaClient,
     question: str,
     *,
+    llm_cfg: dict | None = None,
     timeout_seconds: float = 10.0,
 ) -> IntentResult:
     """Ask Qwen3 (thinking off, low temperature) to classify the intent.
@@ -75,7 +76,8 @@ def classify_intent(
     ]
 
     try:
-        response = client.chat(messages, thinking=False, temperature=0.0)
+        options = resolve_llm_options(llm_cfg or {}, task="intent_classify")
+        response = client.chat(messages, thinking=False, **options)
     except LLMError:
         return IntentResult(intent="wiki", raw_response="<classification failed>")
 
@@ -93,6 +95,8 @@ def classify_intent(
 def generate_chitchat_reply(
     client: OllamaClient,
     question: str,
+    *,
+    llm_cfg: dict | None = None,
 ) -> str:
     """Generate a brief conversational reply (used when intent='chitchat')."""
     messages = [
@@ -101,6 +105,7 @@ def generate_chitchat_reply(
     ]
 
     try:
-        return client.chat(messages, thinking=False, temperature=0.7).strip()
+        options = resolve_llm_options(llm_cfg or {}, task="chitchat")
+        return client.chat(messages, thinking=False, **options).strip()
     except LLMError:
         return "Hi! Ask me a question about your wiki and I'll search for an answer."
