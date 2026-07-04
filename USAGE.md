@@ -35,7 +35,7 @@ Ollama should auto-start when your Mac boots. To check:
 ollama list
 ```
 
-If you see `qwen3:14b` in the list, Ollama is running and the model is available. If the command errors out, start Ollama by opening the **Ollama app** from your Applications folder, or run:
+If you see `qwen3.6:35b` in the list, Ollama is running and the model is available. If the command errors out, start Ollama by opening the **Ollama app** from your Applications folder, or run:
 
 ```bash
 ollama serve &
@@ -399,12 +399,12 @@ source .venv/bin/activate
 
 Ollama isn't running. Start the Ollama app or run `ollama serve &`.
 
-### `Model qwen3:14b not found`
+### `Model qwen3.6:35b not found`
 
-Pull the model first (one-time, ~9GB download):
+Pull the model first (one-time, large download — see disk space note below):
 
 ```bash
-ollama pull qwen3:14b
+ollama pull qwen3.6:35b
 ```
 
 ### Ingest UI shows "Ingesting…" forever / progress vanished
@@ -468,7 +468,7 @@ Most users won't need this — the project is already set up. Include for comple
 - **Python 3.11+** (the project is built against 3.13)
 - **Node.js 22+** (needed for QMD, the search engine)
 - **Homebrew SQLite** — `brew install sqlite` (for QMD's vector extensions)
-- **~15GB free disk space** (for Qwen3-14B and QMD's support models)
+- **~30GB free disk space** (for Qwen3.6-35B and QMD's support models)
 
 ### Install
 
@@ -487,7 +487,7 @@ npm install -g @tobilu/qmd
 
 # 4. Install Ollama and pull the model
 # Get Ollama from https://ollama.com (or brew install --cask ollama)
-ollama pull qwen3:14b
+ollama pull qwen3.6:35b
 
 # 5. Initialize the wiki structure
 wiki init .

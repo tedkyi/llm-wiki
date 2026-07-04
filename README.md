@@ -8,7 +8,7 @@ Feel free to fork and don't forget to give it a Star ⭐️ for better reach!
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Ollama](https://img.shields.io/badge/LLM-Qwen3--14B-purple.svg)](https://ollama.com/library/qwen3)
+[![Ollama](https://img.shields.io/badge/LLM-Qwen3.6--35B-purple.svg)](https://ollama.com/library/qwen3)
 [![Local-first](https://img.shields.io/badge/runs-100%25_local-green.svg)](#)
 
 Built on the pattern Andrej Karpathy described in his [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): instead of retrieving from raw documents at query time (classic RAG), an LLM incrementally **compiles** your sources into a structured, cross-linked markdown wiki that sits between you and the raw documents. The wiki is a **persistent, compounding artifact** — the cross-references are already there, the contradictions have already been flagged, the synthesis already reflects everything you've read.
@@ -79,7 +79,7 @@ Three layers, per Karpathy:
 ```
 ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
 │   raw/        │ → │   LLM Agent   │ → │   wiki/       │
-│ Your docs     │   │  (Qwen3-14B)  │   │ Markdown,     │
+│ Your docs     │   │ (Qwen3.6-35B) │   │ Markdown,     │
 │ (immutable)   │   │               │   │ auto-linked   │
 └───────────────┘   └───────────────┘   └───────────────┘
                           │                     │
@@ -142,7 +142,7 @@ QMD's state is fully **per-wiki**: both `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` a
 
 | Layer | Component | Why |
 |---|---|---|
-| LLM | [Ollama](https://ollama.com) + [Qwen3-14B](https://ollama.com/library/qwen3:14b) Q4_K_M | Strong reasoning, 40K context, thinking mode, 9.3GB on disk |
+| LLM | [Ollama](https://ollama.com) + [Qwen3.6-35B](https://ollama.com/library/qwen3) Q4_K_M | Strong reasoning, 40K context, thinking mode |
 | Search | [QMD](https://github.com/tobi/qmd) (BM25 + vector + rerank) | All local, SQLite-backed, handles the heavy lifting |
 | Embeddings | EmbeddingGemma-300M (via QMD) | Small footprint, high quality |
 | Reranker | Qwen3-Reranker-0.6B (via QMD) | Fast cross-encoder rerank |
@@ -156,12 +156,12 @@ No cloud services. No API keys. No data leaves your machine.
 
 - **Python 3.11+**
 - **Node.js 18+** (for QMD)
-- **Ollama** with the `qwen3:14b` model pulled (~9.3GB). 
+- **Ollama** with the `qwen3.6:35b` model pulled (large download, tens of GB).
   You can specify your preferred model in `config.yml`.
 - **QMD** (`npm install -g @tobilu/qmd`)
 - **Homebrew SQLite** on macOS (`brew install sqlite`)
-- **~15GB free disk space** for models and embeddings
-- **~12GB RAM** recommended (16GB+ for comfort)
+- **~30GB free disk space** for models and embeddings
+- **~24GB RAM** recommended (32GB+ for comfort)
 - **Obsidian** (optional but strongly recommended for browsing)
 
 Tested on macOS (Apple Silicon, M3 Pro 18GB). Should work on Linux; Windows untested.
@@ -178,8 +178,8 @@ uv venv
 source .venv/bin/activate
 uv pip install -e .
 
-# Pull the LLM (one-time, ~9.3GB)
-ollama pull qwen3:14b
+# Pull the LLM (one-time, large download)
+ollama pull qwen3.6:35b
 
 # Install QMD (the search backend)
 npm install -g @tobilu/qmd

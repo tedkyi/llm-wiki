@@ -101,39 +101,36 @@ DEFAULT_CONFIG: dict = {
     "version": 1,
     "llm": {
         "provider": "ollama",
-        "model": "qwen3:14b",
+        "model": "qwen3.6:35b",
         "host": "http://localhost:11434",
         # Qwen3 thinking mode — useful for synthesis/lint, slower for routine ops
         "thinking": True,
         # Base sampling defaults, used unless a task below overrides them
-        "temperature": 0.3,
-        "top_k": 40,
-        "top_p": 0.9,
+        "temperature": 0.6,
+        "top_k": 400,
+        "top_p": 0.99,
         "min_p": 0.0,
         "num_ctx": 131072,
         "num_predict": 8192,
         # Sparse per-task overrides, merged over the base settings above
         "tasks": {
             "extraction": {"num_predict": -1},
-            "extraction_retry": {"temperature": 0.2, "num_predict": -1},
-            "draft": {},
-            "synthesis": {},
-            "intent_classify": {"temperature": 0.0},
-            "chitchat": {"temperature": 0.7},
-            "contradiction": {"temperature": 0.2},
+            "extraction_retry": {"temperature": 0.6, "num_predict": -1},
+            "intent_classify": {"temperature": 0.6},
+            "chitchat": {"temperature": 1.0},
+            "contradiction": {"temperature": 0.6},
         },
     },
     "search": {
         "backend": "qmd",
         "rerank": True,
-        "gpu": "auto",  # "auto" | "cuda" | "vulkan" | "metal" | "false"
     },
     "ingest": {
         "interactive": True,
         "auto_update_index": True,
         "auto_update_log": True,
         # Sources longer than this are truncated before being sent to the LLM
-        "max_source_chars": 60_000,
+        "max_source_chars": 100_000,
     },
 }
 

@@ -713,7 +713,7 @@ def ingest(
     max_source_chars = ingest_cfg.get("max_source_chars", ingest_llm.MAX_SOURCE_CHARS)
 
     host = llm_cfg.get("host", "http://localhost:11434")
-    model = llm_cfg.get("model", "qwen3:14b")
+    model = llm_cfg.get("model", "qwen3.6:35b")
 
     # Verify Ollama is reachable before doing anything
     console.print()
@@ -1017,7 +1017,7 @@ def query(
 
     # Connect to Ollama
     host = llm_cfg.get("host", "http://localhost:11434")
-    model = llm_cfg.get("model", "qwen3:14b")
+    model = llm_cfg.get("model", "qwen3.6:35b")
     client = OllamaClient(host=host, model=model)
     try:
         client.ensure_ready()
@@ -1245,7 +1245,7 @@ def lint(
         config = cfg.load_config(paths)
         llm_cfg = config.get("llm", {})
         host = llm_cfg.get("host", "http://localhost:11434")
-        model = llm_cfg.get("model", "qwen3:14b")
+        model = llm_cfg.get("model", "qwen3.6:35b")
         client = OllamaClient(host=host, model=model)
         try:
             client.ensure_ready()

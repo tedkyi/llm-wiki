@@ -123,7 +123,7 @@ async def query_stream(
     def worker() -> None:
         client = OllamaClient(
             host=llm_cfg.get("host", "http://localhost:11434"),
-            model=llm_cfg.get("model", "qwen3:14b"),
+            model=llm_cfg.get("model", "qwen3.6:35b"),
         )
         try:
             try:
