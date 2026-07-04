@@ -8,7 +8,7 @@ Feel free to fork and don't forget to give it a Star ⭐️ for better reach!
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Ollama](https://img.shields.io/badge/LLM-Qwen3--14B-purple.svg)](https://ollama.com/library/qwen3)
+[![Ollama](https://img.shields.io/badge/LLM-Qwen3.6--35B-purple.svg)](https://ollama.com/library/qwen3)
 [![Local-first](https://img.shields.io/badge/runs-100%25_local-green.svg)](#)
 
 Built on the pattern Andrej Karpathy described in his [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): instead of retrieving from raw documents at query time (classic RAG), an LLM incrementally **compiles** your sources into a structured, cross-linked markdown wiki that sits between you and the raw documents. The wiki is a **persistent, compounding artifact** — the cross-references are already there, the contradictions have already been flagged, the synthesis already reflects everything you've read.
@@ -79,7 +79,7 @@ Three layers, per Karpathy:
 ```
 ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
 │   raw/        │ → │   LLM Agent   │ → │   wiki/       │
-│ Your docs     │   │  (Qwen3-14B)  │   │ Markdown,     │
+│ Your docs     │   │ (Qwen3.6-35B) │   │ Markdown,     │
 │ (immutable)   │   │               │   │ auto-linked   │
 └───────────────┘   └───────────────┘   └───────────────┘
                           │                     │
@@ -113,11 +113,36 @@ After the three passes: `index.md` is rebuilt, `log.md` is appended, and QMD's s
 3. **Synthesis** — Qwen3 writes a cited markdown answer using `[[wikilinks]]` to reference the pages
 4. **(Optional) save-back** — `--save-as` files the answer as a new `synthesis/` page
 
+### Search indexing & chunking (inside QMD)
+
+Search is delegated to [QMD](https://github.com/tobi/qmd), which only understands markdown/plain text. Two collections are registered per wiki:
+
+| Collection | Indexes | Contents |
+|---|---|---|
+| `llm-wiki-pages` | `wiki/**/*.md` | LLM-compiled pages (entities, concepts, sources, synthesis) |
+| `llm-wiki-raw` | `raw-text/**/*.md` | Parser-extracted text mirrors of every tracked source |
+
+The raw collection deliberately points at `raw-text/` mirrors, **never** at the original binaries in `raw/` — QMD has no PDF/DOCX parser and would otherwise index raw file bytes as text. Mirrors are written by `wiki add` (and backfilled by `wiki reindex --full`) with slug-safe filenames so QMD's reported paths map back to files on disk.
+
+Indexing happens in two phases after each ingest:
+
+1. **`qmd update`** — rebuilds the BM25 full-text index synchronously (seconds; keyword search works immediately)
+2. **`qmd embed`** — generates vector embeddings (EmbeddingGemma-300M) in a background thread; failures are logged to `.wiki/logs/embed-fail-*.log`
+
+**Chunking** is QMD's job, done at embed time — this project always hands over whole files:
+
+- Documents ≤ ~3,600 chars become a **single chunk** (most wiki pages)
+- Longer documents are cut at a target of **900 tokens (~3,600 chars) with 15% overlap** (135 tokens / ~540 chars)
+- Cuts snap to natural break points within a ~200-token window of the target — headings score highest (h1 > h2 > …), with a distance penalty — and never land inside code fences
+- These constants are **hard-coded in QMD** (no config/env override), and its embed fingerprint includes them, so changing them would invalidate and re-embed every chunk
+
+QMD's state is fully **per-wiki**: both `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` are pointed at `.wiki/qmd-cache/`, which holds the SQLite index, the collection registry (`index.yml`), and the downloaded GGUF models (embedder, reranker, query-expansion). Overriding only the cache would leave the collection registry global — deleting the index would then silently resurrect stale collection definitions.
+
 ## Stack
 
 | Layer | Component | Why |
 |---|---|---|
-| LLM | [Ollama](https://ollama.com) + [Qwen3-14B](https://ollama.com/library/qwen3:14b) Q4_K_M | Strong reasoning, 40K context, thinking mode, 9.3GB on disk |
+| LLM | [Ollama](https://ollama.com) + [Qwen3.6-35B](https://ollama.com/library/qwen3) Q4_K_M | Strong reasoning, 40K context, thinking mode |
 | Search | [QMD](https://github.com/tobi/qmd) (BM25 + vector + rerank) | All local, SQLite-backed, handles the heavy lifting |
 | Embeddings | EmbeddingGemma-300M (via QMD) | Small footprint, high quality |
 | Reranker | Qwen3-Reranker-0.6B (via QMD) | Fast cross-encoder rerank |
@@ -131,12 +156,12 @@ No cloud services. No API keys. No data leaves your machine.
 
 - **Python 3.11+**
 - **Node.js 18+** (for QMD)
-- **Ollama** with the `qwen3:14b` model pulled (~9.3GB). 
+- **Ollama** with the `qwen3.6:35b` model pulled (large download, tens of GB).
   You can specify your preferred model in `config.yml`.
 - **QMD** (`npm install -g @tobilu/qmd`)
 - **Homebrew SQLite** on macOS (`brew install sqlite`)
-- **~15GB free disk space** for models and embeddings
-- **~12GB RAM** recommended (16GB+ for comfort)
+- **~30GB free disk space** for models and embeddings
+- **~24GB RAM** recommended (32GB+ for comfort)
 - **Obsidian** (optional but strongly recommended for browsing)
 
 Tested on macOS (Apple Silicon, M3 Pro 18GB). Should work on Linux; Windows untested.
@@ -153,8 +178,8 @@ uv venv
 source .venv/bin/activate
 uv pip install -e .
 
-# Pull the LLM (one-time, ~9.3GB)
-ollama pull qwen3:14b
+# Pull the LLM (one-time, large download)
+ollama pull qwen3.6:35b
 
 # Install QMD (the search backend)
 npm install -g @tobilu/qmd
@@ -205,8 +230,8 @@ open wiki/   # then "Open folder as vault"
 | `wiki sources rm <id>` | Remove a source from tracking |
 | `wiki ingest [source_id]` | Run the 3-pass LLM ingest pipeline |
 | `wiki reingest <source_id>` | Reset a source to `pending` so the next `wiki ingest` reprocesses it |
-| `wiki query "<question>" [--scope wiki\|raw\|hybrid] [--save-as <slug>]` | Search + synthesize a cited answer |
-| `wiki reindex` | Force rebuild of the QMD search index |
+| `wiki query "<question>" [--scope wiki\|raw\|hybrid] [--types <t1,t2>] [--save-as <slug>]` | Search + synthesize a cited answer |
+| `wiki reindex [--full]` | Force rebuild of the QMD search index (`--full`: delete index, backfill raw-text mirrors, re-embed everything) |
 | `wiki lint [--deep] [--fix]` | Health-check the wiki |
 | `wiki status` | Show project stats, paths, config, backend health |
 | `wiki serve [--port N]` | Launch the web UI at `http://127.0.0.1:8000` |
@@ -326,7 +351,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v0.9.1** — production-ready for personal use.
+**Current version: v1.0.0** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -340,6 +365,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 | 8 (v0.8.0) | Persistent ingest jobs (survive tab close, server restart) | ✅ Done |
 | 9 (v0.9.0) | Focus on research problem and limitations. Proper extraction JSON and document formatting. Auto-reindex after ingest and lint (BM25 updates immediately, vector embeddings build in the background) | ✅ Done |
 | 9.1 (v0.9.1) | `wiki reingest`, stabilize with retry-with-backoff, per-source diagnostic logs | ✅ Done |
+| 10 (v1.0.0) | Major overhaul of indexing; uses raw text from parser instead of raw file. Also exposed LLM settings to `config.yml` | ✅ Done |
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)

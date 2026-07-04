@@ -19,7 +19,7 @@ from typing import Generator, Iterator
 import httpx
 
 DEFAULT_HOST = "http://localhost:11434"
-DEFAULT_MODEL = "qwen3:14b"
+DEFAULT_MODEL = "qwen3.6:35b"
 DEFAULT_TIMEOUT = 300.0  # 5 minutes — thinking-mode extraction can be slow
 
 _OPTION_KEYS = ("temperature", "top_k", "top_p", "min_p", "num_ctx", "num_predict")

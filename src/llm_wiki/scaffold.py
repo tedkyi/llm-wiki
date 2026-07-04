@@ -68,12 +68,14 @@ def scaffold(root: Path, force: bool = False) -> cfg.WikiPaths:
     # 1. Top-level folders
     root.mkdir(parents=True, exist_ok=True)
     paths.raw.mkdir(parents=True, exist_ok=True)
+    paths.raw_text.mkdir(parents=True, exist_ok=True)
     paths.wiki.mkdir(parents=True, exist_ok=True)
     paths.schema.mkdir(parents=True, exist_ok=True)
     paths.internal.mkdir(parents=True, exist_ok=True)
 
     # 2. Empty subdirectories with .gitkeep so git tracks them
     (paths.raw / ".gitkeep").touch()
+    (paths.raw_text / ".gitkeep").touch()
     for sub in cfg.WIKI_SUBDIRS:
         d = paths.wiki / sub
         d.mkdir(parents=True, exist_ok=True)
