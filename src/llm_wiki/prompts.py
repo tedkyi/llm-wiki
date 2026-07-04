@@ -167,15 +167,22 @@ def build_extraction_retry_messages(
 # Pass 2 — Draft a new entity or concept page
 # ---------------------------------------------------------------------------
 
-NEW_ENTITY_PAGE_TEMPLATE = """Draft a wiki entity page for '{name}'.
-
-This entity was extracted from the source: '{source_title}' (sources/{source_slug})
-
-The source describes it as:
-{description}
+# The shared context block comes FIRST and is identical for every draft call of
+# a source, so inference servers with prefix caching (e.g. vLLM) can reuse the
+# KV cache for the excerpts across all page drafts. Keep everything per-page
+# (name, description, related list, kind-specific instructions) AFTER it.
+DRAFT_PAGE_CONTEXT_TEMPLATE = """You will draft a wiki page for an entity or concept extracted from the source: '{source_title}' (sources/{source_slug})
 
 Here are some relevant excerpts from the source:
 {excerpts}
+
+"""
+
+
+NEW_ENTITY_PAGE_TEMPLATE = """Draft a wiki entity page for '{name}'.
+
+The source describes it as:
+{description}
 
 Related entities and concepts also mentioned in this source (use prefixed [[wikilinks]] to connect to them):
 {related}
@@ -195,13 +202,8 @@ Do not invent facts. Only use information from the excerpts. Return ONLY the mar
 
 NEW_CONCEPT_PAGE_TEMPLATE = """Draft a wiki concept page for '{name}'.
 
-This concept was extracted from the source: '{source_title}' (sources/{source_slug})
-
 The source describes it as:
 {description}
-
-Here are some relevant excerpts from the source:
-{excerpts}
 
 Related entities and concepts also mentioned in this source (use prefixed [[wikilinks]] to connect to them):
 {related}
@@ -230,16 +232,24 @@ def build_draft_page_messages(
     related: list[str],
     today: str,
 ) -> list[ChatMessage]:
-    """Pass 2 — draft a single new entity or concept page."""
+    """Pass 2 — draft a single new entity or concept page.
+
+    The user message starts with the shared context block (source header +
+    excerpts) so it forms an identical prefix across every draft call of a
+    source — required for server-side prompt/prefix caching to take effect.
+    """
     template = NEW_ENTITY_PAGE_TEMPLATE if kind == "entity" else NEW_CONCEPT_PAGE_TEMPLATE
     related_str = "\n".join(f"  - [[{r}]]" for r in related) if related else "  (none)"
-    user_content = template.format(
-        name=name,
+    context = DRAFT_PAGE_CONTEXT_TEMPLATE.format(
         source_title=source_title,
         source_slug=source_slug,
-        description=description,
         excerpts=excerpts,
+    )
+    user_content = context + template.format(
+        name=name,
+        description=description,
         related=related_str,
+        source_slug=source_slug,
         today=today,
     )
     return [
