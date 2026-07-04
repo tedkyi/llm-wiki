@@ -63,6 +63,7 @@ class SearchHit:
     snippet: str = ""        # context around match
     context: str = ""        # collection context set by `qmd context add`
     full_content: str = ""   # only populated after we read the file
+    abs_path: str = ""       # on-disk absolute path (from qmd --full-path)
 
     @property
     def full_path(self) -> str:
@@ -104,8 +105,11 @@ def _find_qmd() -> str:
 def _qmd_env(paths: cfg.WikiPaths) -> dict[str, str]:
     """Build the env for qmd subprocess calls.
 
-    QMD uses XDG_CACHE_HOME to locate its default index. We override it to
-    keep each wiki's index isolated inside .wiki/qmd-cache/ .
+    QMD uses XDG_CACHE_HOME for its index/models AND XDG_CONFIG_HOME for its
+    collection registry (index.yml). Both must be overridden for per-wiki
+    isolation: overriding only the cache dir leaves the collection registry
+    global (~/.config/qmd/index.yml), so deleting the index makes qmd
+    silently re-create collections from stale global definitions.
 
     QMD_LLAMA_GPU controls llama.cpp GPU offloading: "auto" (default), "cuda",
     "vulkan", "metal", or "false" for CPU-only. We read it from search.gpu in
@@ -115,6 +119,7 @@ def _qmd_env(paths: cfg.WikiPaths) -> dict[str, str]:
     cache_dir = paths.internal / "qmd-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["XDG_CACHE_HOME"] = str(cache_dir)
+    env["XDG_CONFIG_HOME"] = str(cache_dir)
     if "QMD_LLAMA_GPU" not in env:
         config = cfg.load_config(paths)
         gpu = config.get("search", {}).get("gpu", "auto")
@@ -190,10 +195,14 @@ def get_version() -> str | None:
 
 
 def ensure_collections(paths: cfg.WikiPaths) -> list[str]:
-    """Make sure the wiki/ and raw/ collections exist in QMD.
+    """Make sure the wiki/ and raw-text/ collections exist in QMD.
 
     Returns the list of collection names that are registered after the call.
     Safe to re-run — `qmd collection add` is idempotent by name.
+
+    IMPORTANT: the raw collection points at raw-text/ (parser-extracted
+    markdown mirrors), NOT raw/. QMD has no PDF/DOCX parser — pointing it at
+    the original binaries makes it index and embed raw file bytes as text.
     """
     added: list[str] = []
 
@@ -213,24 +222,45 @@ def ensure_collections(paths: cfg.WikiPaths) -> list[str]:
                 "--name", "llm-wiki-pages",
                 "--mask", "**/*.md",
             ],
-            timeout=QMD_TIMEOUT_SHORT,
+            # collection add scans the directory contents, so give it the
+            # same headroom as an index update
+            timeout=QMD_TIMEOUT_LONG,
         )
         added.append("llm-wiki-pages")
 
-    # 3. raw collection (everything the parsers support)
+    # 3. raw collection: extracted-text mirrors of the original sources
     if "llm-wiki-raw" not in existing_text:
+        paths.raw_text.mkdir(parents=True, exist_ok=True)
         _run_qmd(
             paths,
             [
-                "collection", "add", str(paths.raw),
+                "collection", "add", str(paths.raw_text),
                 "--name", "llm-wiki-raw",
-                "--mask", "**/*.{md,txt,pdf,docx,html,htm}",
+                "--mask", "**/*.md",
             ],
-            timeout=QMD_TIMEOUT_SHORT,
+            timeout=QMD_TIMEOUT_LONG,
         )
         added.append("llm-wiki-raw")
 
     return added
+
+
+def reset_index(paths: cfg.WikiPaths) -> bool:
+    """Delete QMD's index database (collections, FTS, vectors) for this wiki.
+
+    Downloaded GGUF models in qmd-cache/qmd/models/ are kept — only the
+    index.sqlite (+ WAL/SHM) is removed. Collections must be re-registered
+    with ensure_collections() afterwards. Returns True if anything was
+    deleted.
+    """
+    index_dir = paths.internal / "qmd-cache" / "qmd"
+    deleted = False
+    for name in ("index.sqlite", "index.sqlite-wal", "index.sqlite-shm"):
+        target = index_dir / name
+        if target.exists():
+            target.unlink()
+            deleted = True
+    return deleted
 
 
 def update_fts(paths: cfg.WikiPaths) -> None:
@@ -243,6 +273,32 @@ def update_fts(paths: cfg.WikiPaths) -> None:
     _run_qmd(paths, ["update"], timeout=QMD_TIMEOUT_LONG)
 
 
+def _write_embed_failure_log(paths: cfg.WikiPaths, error: str) -> Path:
+    """Persist an embed failure to .wiki/logs/ (same structure as ingest logs).
+
+    Background embed runs have no terminal to report to, so without this a
+    failed/timed-out embed pass would be invisible — leaving vector search
+    silently incomplete.
+    """
+    from datetime import datetime, timezone
+
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_path = paths.logs / f"embed-fail-{ts}.log"
+    lines = [
+        "Background embed failure log",
+        f"Timestamp : {ts}",
+        "Command   : qmd embed",
+        "",
+        "Error:",
+        error,
+        "",
+        "Vector embeddings are incomplete. Re-run with: wiki reindex",
+    ]
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+    return log_path
+
+
 def _embed_worker(paths: cfg.WikiPaths) -> None:
     """Thread target: run embed, then re-run if more docs arrived during it."""
     global _embed_pending, _embed_thread
@@ -251,8 +307,11 @@ def _embed_worker(paths: cfg.WikiPaths) -> None:
             _embed_pending = False
         try:
             _run_qmd(paths, ["embed"], timeout=QMD_TIMEOUT_LONG)
-        except SearchBackendError:
-            pass
+        except SearchBackendError as e:
+            try:
+                _write_embed_failure_log(paths, str(e))
+            except OSError:
+                pass
         with _embed_lock:
             if not _embed_pending:
                 _embed_thread = None
@@ -295,17 +354,25 @@ def wait_for_embed(timeout: float | None = None) -> bool:
     return not thread.is_alive()
 
 
-def update_index(paths: cfg.WikiPaths, embed: bool = True) -> None:
+def update_index(
+    paths: cfg.WikiPaths,
+    embed: bool = True,
+    embed_timeout: float = QMD_TIMEOUT_LONG,
+) -> None:
     """Rebuild FTS index and optionally embed, both synchronously.
 
     Use this for the explicit `wiki reindex` command. For post-ingest
     auto-updates prefer update_fts() + schedule_embed() so BM25 is
     immediately available and embedding runs in background.
+
+    embed_timeout can be raised for full rebuilds where every chunk needs
+    embedding from scratch. `qmd embed` is incremental, so even a timed-out
+    pass keeps its progress and the next run continues where it stopped.
     """
     ensure_collections(paths)
     _run_qmd(paths, ["update"], timeout=QMD_TIMEOUT_LONG)
     if embed:
-        _run_qmd(paths, ["embed"], timeout=QMD_TIMEOUT_LONG)
+        _run_qmd(paths, ["embed"], timeout=embed_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -356,17 +423,62 @@ def _hit_from_dict(raw: dict) -> SearchHit:
     )
 
 
+_QMD_URI_RE = None  # compiled lazily
+
+
+def _normalize_hit(paths: cfg.WikiPaths, hit: SearchHit) -> None:
+    """Rewrite hit.path into a collection-relative posix path.
+
+    QMD returns either a 'qmd://<collection>/<slug-path>' URI or, with
+    --full-path, an absolute on-disk path. Neither is directly usable:
+    the URI's path is slugified (doesn't match disk filenames) and the
+    absolute path isn't wikilink-friendly. We keep the absolute path in
+    hit.abs_path for hydration and derive collection + relative path
+    for links and filtering.
+    """
+    global _QMD_URI_RE
+    import re
+
+    if _QMD_URI_RE is None:
+        _QMD_URI_RE = re.compile(r"^/?qmd://([^/]+)/(.*)$")
+
+    raw_path = hit.path.replace("\\", "/")
+    m = _QMD_URI_RE.match(raw_path)
+    if m:
+        hit.collection = hit.collection or m.group(1)
+        hit.path = m.group(2)
+        return
+
+    p = Path(hit.path)
+    if not p.is_absolute():
+        return
+    hit.abs_path = str(p)
+    for collection, root in (
+        ("llm-wiki-pages", paths.wiki),
+        ("llm-wiki-raw", paths.raw_text),
+        ("llm-wiki-raw", paths.raw),
+    ):
+        try:
+            rel = p.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        hit.collection = collection
+        hit.path = rel.as_posix()
+        return
+
+
 def _read_full_content(
     paths: cfg.WikiPaths, hit: SearchHit, max_chars: int = 8000
 ) -> str:
     """Look up the original file for a hit and return its (truncated) text."""
-    # QMD returns 'path' relative to the collection. We know the collection
-    # roots from ensure_collections — try both.
     candidates: list[Path] = []
+    # Preferred: the on-disk path qmd itself reported (--full-path)
+    if hit.abs_path:
+        candidates.append(Path(hit.abs_path))
     if hit.collection == "llm-wiki-pages" or not hit.collection:
         candidates.append(paths.wiki / hit.path)
     if hit.collection == "llm-wiki-raw" or not hit.collection:
-        candidates.append(paths.raw / hit.path)
+        candidates.append(paths.raw_text / hit.path)
     # Also try interpreting the path as relative to the project root
     candidates.append(paths.root / hit.path)
 
@@ -415,7 +527,10 @@ def query(
         raise ValueError(f"Invalid mode '{mode}'. Use one of {list(mode_to_subcmd)}")
     subcmd = mode_to_subcmd[mode]
 
-    args = [subcmd, question, "--json", "-n", str(limit)]
+    # --full-path makes qmd report real on-disk paths instead of qmd:// URIs
+    # whose slugified paths don't match disk filenames (hydration would
+    # silently come up empty).
+    args = [subcmd, question, "--json", "-n", str(limit), "--full-path"]
     if min_score > 0:
         args.extend(["--min-score", str(min_score)])
     if collections:
@@ -442,6 +557,7 @@ def query(
         hit = _hit_from_dict(raw)
         if hit.score < min_score:
             continue
+        _normalize_hit(paths, hit)
         if hydrate:
             hit.full_content = _read_full_content(paths, hit)
         hits.append(hit)

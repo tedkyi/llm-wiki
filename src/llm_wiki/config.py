@@ -12,6 +12,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 RAW_DIR = "raw"
+RAW_TEXT_DIR = "raw-text"
 WIKI_DIR = "wiki"
 SCHEMA_DIR = "schema"
 INTERNAL_DIR = ".wiki"
@@ -36,6 +37,16 @@ class WikiPaths:
     @property
     def raw(self) -> Path:
         return self.root / RAW_DIR
+
+    @property
+    def raw_text(self) -> Path:
+        """Plain-text mirrors of raw/ sources — this is what search indexes.
+
+        raw/ holds original binaries (PDF, DOCX, …) which the QMD search
+        backend cannot parse; raw-text/ holds the parser-extracted markdown
+        for each source so full-document search works on real text.
+        """
+        return self.root / RAW_TEXT_DIR
 
     @property
     def wiki(self) -> Path:

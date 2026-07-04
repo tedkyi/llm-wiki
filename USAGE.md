@@ -338,8 +338,12 @@ wiki query "your question here"         # Default: wiki scope, hybrid mode, with
 
 # Scope flags (which collection to search)
 wiki query "..." --scope wiki           # LLM-summarized pages (default)
-wiki query "..." --scope raw            # Original documents
+wiki query "..." --scope raw            # Full extracted text of original documents
 wiki query "..." --scope hybrid         # Both
+
+# Page-type filter (within wiki scope)
+wiki query "..." --types entities,concepts   # Only these page kinds; default is all
+                                             # (entities, concepts, sources, synthesis)
 
 # Mode flags (how to search)
 wiki query "..." --lex                  # BM25 keyword only, fastest
@@ -363,6 +367,11 @@ wiki lint --deep                        # Add LLM contradiction detection (slow)
 
 wiki reindex                            # Force rebuild of the search index
                                         # Use after manually editing wiki pages
+wiki reindex --full                     # Nuke and rebuild from scratch: backfills
+                                        # raw-text/ mirrors, deletes the QMD index,
+                                        # re-registers collections, re-embeds all.
+                                        # Run once to migrate older wikis whose index
+                                        # contains raw PDF bytes indexed as text.
 ```
 
 ### Running the web UI

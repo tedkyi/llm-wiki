@@ -119,12 +119,9 @@ def _build_synthesis_user_prompt(
 
     for i, hit in enumerate(results.hits, start=1):
         lines.append(f"--- Source {i} ---")
-        # Use the full hit path so the LLM sees how to wikilink it.
-        # Strip the qmd:// URI prefix and collection name so the link is
-        # clean and Obsidian-friendly.
-        import re as _re
-        raw_path = hit.full_path.removesuffix(".md")
-        page_link = _re.sub(r"^/?qmd://[^/]+/", "", raw_path).lstrip("/")
+        # hit.path is collection-relative (e.g. 'concepts/rag.md'), so the
+        # wikilink is clean and Obsidian-friendly.
+        page_link = hit.path.removesuffix(".md").lstrip("/")
         lines.append(f"Wikilink path: [[{page_link}]]")
         if hit.title:
             lines.append(f"Title: {hit.title}")
@@ -171,14 +168,10 @@ def _save_synthesis_page(
     today = page_writer.today_iso()
 
     # Derive the list of sources that contributed to this synthesis.
-    # Normalize each hit path so we store clean refs like 'sources/foo'
-    # instead of '/qmd://llm-wiki-pages/sources/foo'.
+    # hit.path is already collection-relative (e.g. 'sources/foo.md').
     source_refs: list[str] = []
     for hit in hits:
-        raw = hit.full_path.removesuffix(".md")
-        # Strip qmd:// URI prefix and any collection name prefix
-        import re as _re
-        cleaned = _re.sub(r"^/?qmd://[^/]+/", "", raw).lstrip("/")
+        cleaned = hit.path.removesuffix(".md").lstrip("/")
         if cleaned and cleaned not in source_refs:
             source_refs.append(cleaned)
 
@@ -237,14 +230,19 @@ def run_query(
     save_as: str | None = None,
     llm_cfg: dict | None = None,
     scope: str = "wiki",  # 'wiki' | 'raw' | 'hybrid'
+    page_types: list[str] | None = None,
     classify_intent_first: bool = True,
 ) -> QueryResult:
     """Run a full query → answer pipeline.
 
     scope determines which QMD collection(s) to search:
         - 'wiki'   → llm-wiki-pages only (LLM-summarized knowledge)
-        - 'raw'    → llm-wiki-raw only (original source documents)
+        - 'raw'    → llm-wiki-raw only (extracted text of source documents)
         - 'hybrid' → both, results merged
+
+    page_types optionally restricts wiki-page hits to specific page kinds
+    ('entities', 'concepts', 'sources', 'synthesis') by their top-level
+    folder. Raw-collection hits are unaffected. None/empty means all types.
 
     classify_intent_first runs intent classification before retrieval. If
     the user asked something like 'hi' or 'thanks', we skip retrieval and
@@ -279,12 +277,16 @@ def run_query(
     else:
         collections_to_search = None  # use QMD default (all collections)
 
+    # When filtering by page type we over-fetch, then trim after the filter,
+    # so the caller still gets up to `limit` hits of the requested kinds.
+    fetch_limit = limit if not page_types else max(limit * 3, 24)
+
     try:
         results = search.query(
             paths,
             question,
             mode=mode,
-            limit=limit,
+            limit=fetch_limit,
             min_score=min_score,
             collections=collections_to_search,
             hydrate=True,
@@ -298,6 +300,20 @@ def run_query(
         result = QueryResult(question=question, error=f"Search failed: {e}")
         callbacks.on_error(result.error)
         return result
+
+    if page_types:
+        wanted = {t.strip().lower() for t in page_types if t.strip()}
+        filtered: list[search.SearchHit] = []
+        for hit in results.hits:
+            if hit.collection and hit.collection != "llm-wiki-pages":
+                filtered.append(hit)  # type filter only applies to wiki pages
+                continue
+            top_dir = hit.path.replace("\\", "/").lstrip("/").split("/", 1)[0].lower()
+            if top_dir in wanted:
+                filtered.append(hit)
+        results.hits = filtered[:limit]
+    else:
+        results.hits = results.hits[:limit]
 
     callbacks.on_search_done(results)
 

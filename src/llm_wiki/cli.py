@@ -945,7 +945,15 @@ def query(
     scope: str = typer.Option(
         "wiki",
         "--scope",
-        help="Search scope: wiki (LLM-summarized pages), raw (original docs), or hybrid (both).",
+        help="Search scope: wiki (LLM-summarized pages), raw (extracted source text), or hybrid (both).",
+    ),
+    types: Optional[str] = typer.Option(
+        None,
+        "--types",
+        help=(
+            "Comma-separated wiki page types to search: entities, concepts, "
+            "sources, synthesis. Default: all types."
+        ),
     ),
     no_intent_classify: bool = typer.Option(
         False,
@@ -977,6 +985,17 @@ def query(
     if scope not in ("wiki", "raw", "hybrid"):
         _err(f"Invalid scope '{scope}'. Use wiki, raw, or hybrid.")
         raise typer.Exit(code=1)
+
+    page_types: list[str] | None = None
+    if types:
+        page_types = [t.strip().lower() for t in types.split(",") if t.strip()]
+        invalid = [t for t in page_types if t not in cfg.WIKI_SUBDIRS]
+        if invalid:
+            _err(
+                f"Invalid page type(s): {', '.join(invalid)}. "
+                f"Valid types: {', '.join(cfg.WIKI_SUBDIRS)}"
+            )
+            raise typer.Exit(code=1)
 
     # Sanity checks
     if not search.is_available():
@@ -1026,6 +1045,7 @@ def query(
             save_as=save_as,
             llm_cfg=llm_cfg,
             scope=scope,
+            page_types=page_types,
             classify_intent_first=not no_intent_classify,
         )
     finally:
@@ -1036,11 +1056,24 @@ def query(
 
 
 @app.command()
-def reindex() -> None:
-    """Force a full rebuild of the QMD search index.
+def reindex(
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help=(
+            "Nuke the QMD index and rebuild from scratch: backfill missing "
+            "raw-text mirrors, delete index.sqlite (models are kept), "
+            "re-register collections, then update + embed."
+        ),
+    ),
+) -> None:
+    """Force a rebuild of the QMD search index.
 
-    Normally this runs automatically after `wiki ingest`, so you only need
-    this if the index gets out of sync (e.g. you edited wiki pages manually).
+    Normally indexing runs automatically after `wiki ingest`, so you only
+    need this if the index gets out of sync (e.g. you edited wiki pages
+    manually). Use --full to migrate wikis whose index predates raw-text/
+    mirrors — the old index contains embedded PDF binary garbage that only
+    a rebuild removes.
     """
     paths = _resolve_root_or_die()
     if not search.is_available():
@@ -1048,13 +1081,53 @@ def reindex() -> None:
         _hint("Install it with: [bold]npm install -g @tobilu/qmd[/bold]")
         raise typer.Exit(code=1)
 
+    embed_timeout = search.QMD_TIMEOUT_LONG
+
+    if full:
+        # 1. Make sure every tracked source has an extracted-text mirror,
+        #    since the rebuilt raw collection indexes raw-text/ only.
+        console.print()
+        console.print("[dim]Backfilling raw-text mirrors from tracked sources…[/dim]")
+
+        from rich.progress import Progress
+
+        with Progress(console=console, transient=True) as prog:
+            task = prog.add_task("Parsing sources", total=None)
+
+            def _on_progress(relpath: str, i: int, total: int) -> None:
+                prog.update(task, total=total, completed=i, description=f"Parsing {relpath}")
+
+            stats = ingest_raw.backfill_text_mirrors(paths, progress=_on_progress)
+
+        _ok(
+            f"Mirrors: {stats.written} written, "
+            f"{stats.skipped_existing} already present, "
+            f"{stats.missing_file} missing source files"
+        )
+        for err in stats.parse_errors:
+            _warn(f"Parse failed: {err}")
+
+        # 2. Drop the old index (keeps downloaded GGUF models).
+        console.print("[dim]Deleting old QMD index…[/dim]")
+        if search.reset_index(paths):
+            _ok("Old index deleted")
+        else:
+            _ok("No existing index found — starting fresh")
+
+        # A from-scratch embed touches every chunk; give it more headroom.
+        # `qmd embed` is incremental, so a timeout doesn't lose progress —
+        # re-running reindex continues where it stopped.
+        embed_timeout = 7200.0
+
     console.print()
-    console.print("[dim]Rebuilding search index (this may take a minute)…[/dim]")
+    console.print("[dim]Rebuilding search index (this may take a while)…[/dim]")
     try:
-        search.update_index(paths, embed=True)
-        _ok("Search index rebuilt")
+        search.update_index(paths, embed=True, embed_timeout=embed_timeout)
+        _ok("Search index rebuilt (BM25 + vector embeddings)")
     except search.SearchBackendError as e:
         _err(f"Index rebuild failed: {e}")
+        if full:
+            _hint("Progress is kept — re-run [bold]wiki reindex[/bold] to continue embedding.")
         raise typer.Exit(code=1)
 
 

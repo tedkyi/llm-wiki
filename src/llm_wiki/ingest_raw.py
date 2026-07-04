@@ -9,7 +9,7 @@ and provenance work downstream.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -18,6 +18,7 @@ from typing import Iterable
 from . import config as cfg
 from . import db
 from . import parsers
+from . import slugify
 
 
 class AddResult(str, Enum):
@@ -84,6 +85,115 @@ def _is_inside_raw(path: Path, raw_dir: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Text mirrors: raw-text/<original-filename>.md
+# ---------------------------------------------------------------------------
+# The search backend (QMD) only understands plain text / markdown, so for
+# every source in raw/ we persist the parser-extracted text as a markdown
+# mirror in raw-text/. That mirror — not the original binary — is what gets
+# indexed for full-document search.
+
+
+def text_mirror_path(paths: cfg.WikiPaths, source_file: Path) -> Path:
+    """Return the raw-text/ mirror path for a file in raw/.
+
+    The name is the slugified original filename (extension included, so
+    'foo.pdf' and 'foo.txt' stay distinct: 'foo-pdf.md' / 'foo-txt.md').
+    Slugs contain only [a-z0-9-], which QMD's internal path slugging leaves
+    untouched — this keeps QMD's reported document paths mappable back to
+    the file on disk. The original filename is recorded in the mirror's
+    frontmatter (source_file).
+    """
+    slug = slugify.slugify(source_file.name, max_length=120)
+    return paths.raw_text / f"{slug}.md"
+
+
+def write_text_mirror(
+    paths: cfg.WikiPaths, source_file: Path, parsed
+) -> Path:
+    """Write the extracted text of a parsed source to its raw-text/ mirror.
+
+    The mirror gets minimal frontmatter (title + provenance) and an H1 so
+    QMD can extract a meaningful title for search results.
+    """
+    mirror = text_mirror_path(paths, source_file)
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source_rel = str(source_file.relative_to(paths.root)).replace("\\", "/")
+    except ValueError:
+        source_rel = source_file.name
+    title = (parsed.title or source_file.stem).strip()
+    safe_title = title.replace('"', "'")
+    content = (
+        "---\n"
+        f'title: "{safe_title}"\n'
+        f'source_file: "{source_rel}"\n'
+        f"content_hash: {parsed.content_hash}\n"
+        "---\n"
+        "\n"
+        f"# {title}\n"
+        "\n"
+        f"{parsed.text}\n"
+    )
+    mirror.write_text(content, encoding="utf-8")
+    return mirror
+
+
+def delete_text_mirror(paths: cfg.WikiPaths, source_file: Path) -> bool:
+    """Remove the raw-text/ mirror for a source file, if present."""
+    mirror = text_mirror_path(paths, source_file)
+    if mirror.exists():
+        try:
+            mirror.unlink()
+            return True
+        except OSError:
+            return False
+    return False
+
+
+@dataclass
+class BackfillStats:
+    written: int = 0
+    skipped_existing: int = 0
+    missing_file: int = 0
+    parse_errors: list[str] = field(default_factory=list)
+
+
+def backfill_text_mirrors(
+    paths: cfg.WikiPaths,
+    *,
+    force: bool = False,
+    progress=None,  # optional callable(relpath: str, index: int, total: int)
+) -> BackfillStats:
+    """Ensure every tracked source has a raw-text/ mirror.
+
+    Re-parses sources from raw/ (no LLM involved) and writes any missing
+    mirrors. With force=True, existing mirrors are rewritten too. Used by
+    `wiki reindex --full` to migrate wikis created before mirrors existed.
+    """
+    stats = BackfillStats()
+    rows = list_sources(paths)
+    total = len(rows)
+    for i, row in enumerate(rows, start=1):
+        source_file = paths.root / row["relpath"]
+        if progress is not None:
+            progress(row["relpath"], i, total)
+        if not source_file.exists():
+            stats.missing_file += 1
+            continue
+        if not force and text_mirror_path(paths, source_file).exists():
+            stats.skipped_existing += 1
+            continue
+        try:
+            parsed = parsers.parse(source_file)
+        except parsers.ParserError as e:
+            stats.parse_errors.append(f"{row['relpath']}: {e}")
+            continue
+        write_text_mirror(paths, source_file, parsed)
+        stats.written += 1
+    return stats
 
 
 def add_file(
@@ -216,6 +326,14 @@ def add_file(
         if "#'?'" in message:
             message = message.replace("#'?'", f"#{source_id}")
 
+    # Persist the extracted text so the search backend has real content to
+    # index (it can't parse PDFs/DOCX). Empty extractions have nothing useful.
+    if result_kind == AddResult.ADDED:
+        try:
+            write_text_mirror(paths, final_path, parsed)
+        except OSError:
+            pass  # mirror is best-effort; backfill can recreate it
+
     return AddOutcome(
         result=result_kind,
         source_path=final_path,
@@ -324,6 +442,8 @@ def remove_source(
         conn.execute("DELETE FROM source_pages WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM ingest_runs WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+
+    delete_text_mirror(paths, file_path)
 
     deleted_file = False
     if delete_file and file_path.exists() and _is_inside_raw(file_path, paths.raw):
