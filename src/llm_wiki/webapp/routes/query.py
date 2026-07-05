@@ -17,10 +17,11 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from ... import config as cfg
+from ... import credentials
 from ... import page_writer
 from ... import query as query_module
 from ... import search
-from ...llm import OllamaClient
+from ...llm import LLMError, LLMRouter
 
 router = APIRouter()
 
@@ -28,10 +29,16 @@ router = APIRouter()
 @router.get("/query", response_class=HTMLResponse)
 async def query_page(request: Request) -> HTMLResponse:
     """Render the chat-style query interface."""
+    paths: cfg.WikiPaths = request.app.state.wiki_paths
+    llm_cfg = cfg.load_config(paths).get("llm", {})
     return request.app.state.templates.TemplateResponse(
         request,
         "query.html",
-        {"page": "query"},
+        {
+            "page": "query",
+            "providers": list(llm_cfg.get("providers", {}).keys()),
+            "default_provider": llm_cfg.get("default_provider", ""),
+        },
     )
 
 
@@ -106,11 +113,13 @@ async def query_stream(
     request: Request,
     q: str,
     scope: str = "wiki",  # 'wiki' | 'raw' | 'hybrid'
+    provider: str | None = None,  # force a specific provider profile
 ) -> StreamingResponse:
     """SSE stream: run the query in a worker thread, pipe progress events."""
     paths: cfg.WikiPaths = request.app.state.wiki_paths
     config = cfg.load_config(paths)
     llm_cfg = config.get("llm", {})
+    override = provider or None
 
     # Validate scope
     if scope not in ("wiki", "raw", "hybrid"):
@@ -121,22 +130,25 @@ async def query_stream(
     result_holder: dict[str, query_module.QueryResult | None] = {"result": None}
 
     def worker() -> None:
-        client = OllamaClient(
-            host=llm_cfg.get("host", "http://localhost:11434"),
-            model=llm_cfg.get("model", "qwen3.6:35b"),
-        )
+        credentials.prime_environment()
+        try:
+            router_obj = LLMRouter(llm_cfg, override=override)
+        except LLMError as e:
+            event_q.put(("error", {"text": str(e)}))
+            done_event.set()
+            return
         try:
             try:
-                client.ensure_ready()
+                router_obj.ensure_ready()
             except Exception as e:
-                event_q.put(("error", {"text": f"Ollama not ready: {e}"}))
+                event_q.put(("error", {"text": f"LLM provider not ready: {e}"}))
                 return
 
             callbacks = _SSECallbacks(event_q)
             try:
                 result = query_module.run_query(
                     paths,
-                    client,
+                    router_obj,
                     question=q,
                     callbacks=callbacks,
                     mode="hybrid",
@@ -144,7 +156,6 @@ async def query_stream(
                     min_score=0.0,
                     rerank=True,
                     save_as=None,
-                    llm_cfg=llm_cfg,
                     scope=scope,
                     classify_intent_first=True,
                 )
@@ -153,7 +164,7 @@ async def query_stream(
                 event_q.put(("error", {"text": f"Query failed: {e}"}))
         finally:
             try:
-                client.close()
+                router_obj.close()
             except Exception:
                 pass
             done_event.set()

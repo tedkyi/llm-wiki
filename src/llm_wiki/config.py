@@ -97,28 +97,204 @@ class WikiPaths:
 # Default config (written on `wiki init`)
 # ---------------------------------------------------------------------------
 
+# The pipeline tasks that request an LLM completion. Each is routed to a
+# provider via `llm.task_providers` and resolves its sampling settings from
+# that provider's profile.
+LLM_TASKS = (
+    "extraction",
+    "extraction_retry",
+    "draft",
+    "synthesis",
+    "intent_classify",
+    "chitchat",
+    "contradiction",
+)
+
+# Keys on a provider profile that are structural, not sampling options. Anything
+# else at a profile's top level (and under its `tasks.<task>`) is passed through
+# to the client as a sampling parameter in that provider's own vocabulary.
+PROVIDER_RESERVED_KEYS = frozenset(
+    {"type", "model", "host", "api_base", "api_key_env", "thinking", "tasks", "timeout"}
+)
+
+# Friendly provider "type" presets for the settings UI. Each maps a
+# protocol/vendor the user picks to how a profile is built: the internal client
+# `type`, the LiteLLM model-string prefix, and which endpoint field (if any) is
+# relevant. This lets users add any OpenAI-compatible or vendor provider by name
+# without knowing LiteLLM's prefix conventions. `endpoint_field` is None for
+# vendors reached at a fixed cloud URL. Order defines the dropdown order.
+PROVIDER_TYPE_PRESETS: dict = {
+    "ollama-native": {
+        "label": "Ollama (native)",
+        "type": "ollama-native",
+        "model_prefix": "",
+        "endpoint_field": "host",
+        "endpoint_label": "Host",
+        "endpoint_placeholder": "http://localhost:11434",
+    },
+    "ollama": {
+        "label": "Ollama (via LiteLLM)",
+        "type": "litellm",
+        "model_prefix": "ollama/",
+        "endpoint_field": "api_base",
+        "endpoint_label": "API base",
+        "endpoint_placeholder": "http://localhost:11434",
+    },
+    "openai-compatible": {
+        "label": "OpenAI-compatible (vLLM, LocalAI, …)",
+        "type": "litellm",
+        "model_prefix": "hosted_vllm/",
+        "endpoint_field": "api_base",
+        "endpoint_label": "API base",
+        "endpoint_placeholder": "http://localhost:8000/v1",
+    },
+    "lm-studio": {
+        "label": "LM Studio",
+        "type": "litellm",
+        "model_prefix": "lm_studio/",
+        "endpoint_field": "api_base",
+        "endpoint_label": "API base",
+        "endpoint_placeholder": "http://localhost:1234/v1",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "type": "litellm",
+        "model_prefix": "openai/",
+        "endpoint_field": None,
+        "endpoint_label": "",
+        "endpoint_placeholder": "",
+    },
+    "anthropic": {
+        "label": "Anthropic",
+        "type": "litellm",
+        "model_prefix": "anthropic/",
+        "endpoint_field": None,
+        "endpoint_label": "",
+        "endpoint_placeholder": "",
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "type": "litellm",
+        "model_prefix": "gemini/",
+        "endpoint_field": None,
+        "endpoint_label": "",
+        "endpoint_placeholder": "",
+    },
+    "custom": {
+        "label": "Custom (full LiteLLM model string)",
+        "type": "litellm",
+        "model_prefix": "",  # user supplies the prefix themselves
+        "endpoint_field": "api_base",
+        "endpoint_label": "API base (optional)",
+        "endpoint_placeholder": "",
+    },
+}
+
+
+def build_provider_profile(
+    preset_id: str, model: str, endpoint: str = "", api_key_env: str = ""
+) -> dict:
+    """Construct a provider profile dict from a UI preset + user inputs.
+
+    Applies the preset's LiteLLM model-string prefix (unless the user already
+    typed it) and stores the endpoint under the right field. An optional
+    `api_key_env` names the environment variable to read the API key from (for
+    OpenAI-compatible / secured endpoints that need their own key). Raises
+    ValueError on an unknown preset or empty model.
+    """
+    preset = PROVIDER_TYPE_PRESETS.get(preset_id)
+    if preset is None:
+        raise ValueError(f"Unknown provider type '{preset_id}'.")
+    model = (model or "").strip()
+    if not model:
+        raise ValueError("Model is required.")
+    prefix = preset["model_prefix"]
+    if prefix and not model.startswith(prefix):
+        model = prefix + model
+    profile: dict = {"type": preset["type"], "model": model, "tasks": {}}
+    field = preset["endpoint_field"]
+    if field and endpoint.strip():
+        profile[field] = endpoint.strip()
+    if api_key_env.strip():
+        profile["api_key_env"] = api_key_env.strip()
+    return profile
+
 DEFAULT_CONFIG: dict = {
     "version": 1,
     "llm": {
-        "provider": "ollama",
-        "model": "qwen3.6:35b",
-        "host": "http://localhost:11434",
-        # Qwen3 thinking mode — useful for synthesis/lint, slower for routine ops
-        "thinking": True,
-        # Base sampling defaults, used unless a task below overrides them
-        "temperature": 0.6,
-        "top_k": 400,
-        "top_p": 0.99,
-        "min_p": 0.0,
-        "num_ctx": 131072,
-        "num_predict": 8192,
-        # Sparse per-task overrides, merged over the base settings above
-        "tasks": {
-            "extraction": {"num_predict": -1},
-            "extraction_retry": {"temperature": 0.6, "num_predict": -1},
-            "intent_classify": {"temperature": 0.6},
-            "chitchat": {"temperature": 1.0},
-            "contradiction": {"temperature": 0.6},
+        # Fallback provider for tasks missing from task_providers and for
+        # ad-hoc calls that don't name a task.
+        "default_provider": "ollama",
+        # Which provider profile handles each pipeline task.
+        "task_providers": {task: "ollama" for task in LLM_TASKS},
+        # Named, self-contained provider profiles. Each carries its model,
+        # connection info, sampling defaults, and per-task overrides in that
+        # provider's own parameter vocabulary.
+        "providers": {
+            "ollama": {
+                # Existing native httpx path (Ollama /api/chat).
+                "type": "ollama-native",
+                "model": "qwen3.6:35b",
+                "host": "http://localhost:11434",
+                # Qwen3 thinking mode — useful for synthesis/lint, slower for
+                # routine ops.
+                "thinking": True,
+                # Base sampling defaults (Ollama option names), used unless a
+                # task below overrides them.
+                "temperature": 0.6,
+                "top_k": 400,
+                "top_p": 0.99,
+                "min_p": 0.0,
+                "num_ctx": 131072,
+                "num_predict": 8192,
+                # Sparse per-task overrides, merged over the base settings above.
+                "tasks": {
+                    "extraction": {"num_predict": -1},
+                    "extraction_retry": {"temperature": 0.6, "num_predict": -1},
+                    "intent_classify": {"temperature": 0.6},
+                    "chitchat": {"temperature": 1.0},
+                    "contradiction": {"temperature": 0.6},
+                },
+            },
+            "ollama-litellm": {
+                # Same Ollama server, reached through LiteLLM's OpenAI-compatible
+                # path — kept alongside the native profile for A/B comparison.
+                "type": "litellm",
+                "model": "ollama/qwen3.6:35b",
+                "api_base": "http://localhost:11434",
+                "thinking": True,
+                "temperature": 0.6,
+                "top_k": 400,
+                "top_p": 0.99,
+                "min_p": 0.0,
+                "num_ctx": 131072,
+                "num_predict": 8192,
+                "tasks": {
+                    "extraction": {"num_predict": -1},
+                    "extraction_retry": {"temperature": 0.6, "num_predict": -1},
+                    "intent_classify": {"temperature": 0.6},
+                    "chitchat": {"temperature": 1.0},
+                    "contradiction": {"temperature": 0.6},
+                },
+            },
+            # Example cloud profiles — not wired/tested yet, but selectable.
+            # API keys are resolved per-vendor from the environment/keyring
+            # (see credentials.py), never stored here.
+            "anthropic": {
+                "type": "litellm",
+                "model": "anthropic/claude-opus-4-8",
+                # OpenAI/Anthropic vocabulary (max_tokens, not num_predict).
+                "temperature": 1.0,
+                "max_tokens": 8192,
+                "tasks": {},
+            },
+            "openai": {
+                "type": "litellm",
+                "model": "openai/gpt-4o",
+                "temperature": 1.0,
+                "max_tokens": 8192,
+                "tasks": {},
+            },
         },
     },
     "search": {
@@ -146,16 +322,47 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _normalize_llm_config(loaded: dict) -> dict:
+    """Upgrade a legacy flat `llm` block to the provider-profile schema.
+
+    Pre-multi-provider configs stored model/host/sampling/tasks directly under
+    `llm` with a top-level `provider` string. Detect that shape (no `providers`
+    key) and wrap it into a single `ollama` profile so existing `.wiki/config.yml`
+    files keep working without a manual edit. Returns the loaded dict unchanged
+    if it's already in the new shape (or has no `llm` block).
+    """
+    llm = loaded.get("llm")
+    if not isinstance(llm, dict) or "providers" in llm:
+        return loaded
+
+    llm = dict(llm)
+    legacy_provider = llm.pop("provider", "ollama") or "ollama"
+    tasks = llm.pop("tasks", {})
+    # Everything left on the flat block (model, host, thinking, sampling) becomes
+    # the profile body.
+    profile = {"type": "ollama-native", **llm, "tasks": tasks}
+
+    loaded = dict(loaded)
+    loaded["llm"] = {
+        "default_provider": legacy_provider,
+        "task_providers": {task: legacy_provider for task in LLM_TASKS},
+        "providers": {legacy_provider: profile},
+    }
+    return loaded
+
+
 def load_config(paths: WikiPaths) -> dict:
     """Load the wiki's config.yml, falling back to defaults for missing keys.
 
-    Nested dicts (e.g. `llm`, `llm.tasks`) are merged key-by-key so a partial
-    override in config.yml doesn't drop unrelated defaults.
+    Nested dicts (e.g. `llm`, `llm.providers`) are merged key-by-key so a partial
+    override in config.yml doesn't drop unrelated defaults. Legacy flat `llm`
+    blocks are upgraded to the provider-profile schema before merging.
     """
     if not paths.config_file.exists():
         return dict(DEFAULT_CONFIG)
     with paths.config_file.open("r", encoding="utf-8") as f:
         loaded = yaml.safe_load(f) or {}
+    loaded = _normalize_llm_config(loaded)
     return _deep_merge(DEFAULT_CONFIG, loaded)
 
 

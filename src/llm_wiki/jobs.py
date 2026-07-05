@@ -31,7 +31,8 @@ from . import config as cfg
 from . import db
 from . import ingest_llm
 from . import ingest_raw
-from .llm import LLMError, OllamaClient
+from . import credentials
+from .llm import LLMError, LLMRouter
 
 
 MAX_CONCURRENT_DEFAULT = 2
@@ -413,23 +414,21 @@ class JobManager:
         max_source_chars = config.get("ingest", {}).get(
             "max_source_chars", ingest_llm.MAX_SOURCE_CHARS
         )
-        client = OllamaClient(
-            host=llm_cfg.get("host", "http://localhost:11434"),
-            model=llm_cfg.get("model", "qwen3.6:35b"),
-        )
+        credentials.prime_environment()
+        router = LLMRouter(llm_cfg)
         try:
             try:
-                client.ensure_ready()
+                router.ensure_ready()
             except LLMError as e:
                 _update_job(
                     self.paths,
                     job_id,
                     state="failed",
-                    error=f"Ollama not ready: {e}",
+                    error=f"LLM provider not ready: {e}",
                     finished_at=_now(),
                 )
                 _append_event(
-                    self.paths, job_id, "error", {"text": f"Ollama not ready: {e}"}
+                    self.paths, job_id, "error", {"text": f"LLM provider not ready: {e}"}
                 )
                 return
 
@@ -449,9 +448,8 @@ class JobManager:
             ingest_llm.ingest_source(
                 self.paths,
                 job.source_id,
-                client,
+                router,
                 callbacks=callbacks,
-                llm_cfg=llm_cfg,
                 max_source_chars=max_source_chars,
             )
             # Prune after each successful job to keep the jobs list short
@@ -461,7 +459,7 @@ class JobManager:
                 pass
         finally:
             try:
-                client.close()
+                router.close()
             except Exception:
                 pass
 

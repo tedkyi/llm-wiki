@@ -3,6 +3,9 @@
 .wiki/state.sqlite-*
 .wiki/cache/
 
+# Secrets — API keys for cloud inference providers
+.env
+
 # Python
 __pycache__/
 *.py[cod]
