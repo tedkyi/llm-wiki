@@ -8,6 +8,7 @@ Stage 1 commands:
 Stage 2 commands:
     wiki add <path> [-r]     Copy a file or folder into raw/, parse, track.
     wiki sources list        List all tracked sources.
+    wiki sources summary     Show source counts and id ranges grouped by status.
     wiki sources show <id>   Show details for one source (with text preview).
     wiki sources rm <id>     Remove a source from tracking.
 
@@ -433,6 +434,46 @@ def sources_list_cmd(
 
     console.print()
     console.print(table)
+    console.print()
+
+
+@sources_app.command("summary")
+def sources_summary_cmd() -> None:
+    """Show source counts and id ranges grouped by status."""
+    paths = _resolve_root_or_die()
+    rows = ingest_raw.summarize_sources(paths)
+
+    if not rows:
+        console.print()
+        _warn("No sources tracked yet.")
+        _hint("Add one with [bold]wiki add <file>[/bold]")
+        return
+
+    table = Table(
+        title="Sources by status",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("Status", width=9)
+    table.add_column("Count", justify="right", width=7)
+    table.add_column("Min ID", justify="right", width=7)
+    table.add_column("Max ID", justify="right", width=7)
+
+    total = 0
+    for row in rows:
+        status = row["status"]
+        status_styled = f"[{_status_style(status)}]{status}[/{_status_style(status)}]"
+        table.add_row(
+            status_styled,
+            str(row["count"]),
+            str(row["min_id"]),
+            str(row["max_id"]),
+        )
+        total += row["count"]
+
+    console.print()
+    console.print(table)
+    console.print(f"  [dim]total: {total}[/dim]")
     console.print()
 
 

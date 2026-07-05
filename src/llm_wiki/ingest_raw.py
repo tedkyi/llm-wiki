@@ -384,6 +384,17 @@ def list_sources(
         return [dict(row) for row in rows]
 
 
+def summarize_sources(paths: cfg.WikiPaths) -> list[dict]:
+    """Return per-status counts and id ranges for all tracked sources."""
+    query = (
+        "SELECT status, COUNT(*) AS count, MIN(id) AS min_id, MAX(id) AS max_id "
+        "FROM sources GROUP BY status ORDER BY status ASC"
+    )
+    with db.connect(paths.state_db) as conn:
+        rows = conn.execute(query).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_source(paths: cfg.WikiPaths, source_id: int) -> dict | None:
     """Fetch a single source row by id."""
     with db.connect(paths.state_db) as conn:
