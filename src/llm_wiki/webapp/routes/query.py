@@ -37,7 +37,6 @@ async def query_page(request: Request) -> HTMLResponse:
         {
             "page": "query",
             "providers": list(llm_cfg.get("providers", {}).keys()),
-            "default_provider": llm_cfg.get("default_provider", ""),
         },
     )
 

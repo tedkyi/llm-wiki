@@ -130,9 +130,9 @@
            class="flex-1 bg-transparent px-3 py-2 text-white placeholder-[#6b7280] focus:outline-none">
     {% if providers %}
     <select id="query-provider"
-            title="Inference provider"
+            title="Inference provider — 'Configured routing' uses your per-task provider settings; picking one forces the whole query onto it."
             class="bg-[#161922] border border-[#2a2e3a] text-[#c7ccd6] text-sm rounded-md px-2 py-2 focus:outline-none">
-        <option value="">Default{% if default_provider %} ({{ default_provider }}){% endif %}</option>
+        <option value="">Configured routing</option>
         {% for p in providers %}
         <option value="{{ p }}">{{ p }}</option>
         {% endfor %}

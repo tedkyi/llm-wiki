@@ -104,17 +104,37 @@ def _resolve_root_or_die() -> cfg.WikiPaths:
     return cfg.WikiPaths(root=root)
 
 
+def _report_routing(router: LLMRouter, tasks: tuple[str, ...]) -> None:
+    """Print which provider/model handles each of a command's tasks.
+
+    Resolves each task through the router's own routing (so a --provider
+    override or per-task mapping is reflected). Collapses to one line when every
+    task resolves to the same provider.
+    """
+    rows = [(t, router.provider_for(t), router.model_for(t)) for t in tasks]
+    distinct = {(p, m) for _, p, m in rows}
+    if len(distinct) == 1:
+        provider, model = next(iter(distinct))
+        _ok(f"Provider ready · [bold]{provider}[/bold] · {model}")
+        return
+    _ok("Providers ready:")
+    for task, provider, model in rows:
+        console.print(f"    [dim]{task:16}[/dim] [bold]{provider}[/bold] · {model}")
+
+
 def _build_router(
     paths: cfg.WikiPaths,
     *,
     provider: str | None = None,
+    tasks: tuple[str, ...] = (),
     fail_hint: str | None = None,
 ) -> LLMRouter:
     """Build an LLMRouter from config and verify its providers are reachable.
 
     `provider` (the `--provider` flag) forces every task onto one profile.
-    Loads vendor API keys into the environment first. Exits with a helpful
-    message on any configuration/connectivity error.
+    `tasks` are the pipeline tasks this command will run — reported (with their
+    resolved provider/model) once the check passes. Loads vendor API keys into
+    the environment first. Exits with a helpful message on any error.
     """
     credentials.prime_environment()
     config = cfg.load_config(paths)
@@ -140,8 +160,8 @@ def _build_router(
             _hint(fail_hint)
         raise typer.Exit(code=1)
 
-    active = provider or router.provider_for()
-    _ok(f"Providers ready · default=[bold]{active}[/bold]")
+    if tasks:
+        _report_routing(router, tasks)
     return router
 
 
@@ -289,10 +309,10 @@ def status() -> None:
     search_cfg = config.get("search", {})
     ingest_cfg = config.get("ingest", {})
     providers = llm.get("providers", {})
-    default_provider = llm.get("default_provider", "?")
-    cfg_table.add_row("Default provider", f"[bold]{default_provider}[/bold]")
+    default_provider = llm.get("default_provider")
 
     # Each configured provider profile: model + (host/api_base) + vendor key.
+    cfg_table.add_row("Providers", "")
     for name, profile in providers.items():
         model = profile.get("model", "?")
         endpoint = profile.get("host") or profile.get("api_base") or ""
@@ -303,17 +323,19 @@ def status() -> None:
         else:
             key_note = "[dim]local[/dim]"
         endpoint_note = f" · {endpoint}" if endpoint else ""
-        marker = " [dim](default)[/dim]" if name == default_provider else ""
-        cfg_table.add_row(f"  {name}{marker}", f"{model}{endpoint_note} · {key_note}")
+        cfg_table.add_row(f"  {name}", f"{model}{endpoint_note} · {key_note}")
 
-    # Task → provider routing (only show tasks routed away from the default).
+    # Task → provider routing, grouped by provider (resolve each task the way
+    # the router would: its mapping, falling back to default_provider).
     task_providers = llm.get("task_providers", {})
-    routed = {t: p for t, p in task_providers.items() if p != default_provider}
-    if routed:
-        summary = ", ".join(f"{t} -> {p}" for t, p in routed.items())
-        cfg_table.add_row("Task routing", summary)
-    else:
-        cfg_table.add_row("Task routing", f"[dim]all tasks -> {default_provider}[/dim]")
+    groups: dict[str, list[str]] = {}
+    for task in cfg.LLM_TASKS:
+        prov = task_providers.get(task) or default_provider or "?"
+        groups.setdefault(prov, []).append(task)
+    routing_lines = "\n".join(
+        f"[bold]{prov}[/bold]: {', '.join(tasks)}" for prov, tasks in groups.items()
+    )
+    cfg_table.add_row("Task routing", routing_lines)
     cfg_table.add_row("Max source chars", str(ingest_cfg.get("max_source_chars", "?")))
     cfg_table.add_row("Search backend", search_cfg.get("backend", "?"))
     cfg_table.add_row("Reranking", "on" if search_cfg.get("rerank") else "off")
@@ -681,18 +703,17 @@ def providers_list() -> None:
                 key_note = "[green]set[/green]" if has else "[red]missing[/red]"
         else:
             key_note = "[dim]not needed[/dim]"
-        label = f"{name} [dim](default)[/dim]" if name == default_provider else name
-        table.add_row(label, profile.get("type", "?"), model, endpoint, key_note)
+        table.add_row(name, profile.get("type", "?"), model, endpoint, key_note)
     console.print()
     console.print(table)
 
-    # Task routing
+    # Task routing — resolve each task the way the router would.
     console.print()
     routing = Table(title="Task -> provider routing", box=None, padding=(0, 2))
     routing.add_column("Task", style="dim")
     routing.add_column("Provider")
     for task in cfg.LLM_TASKS:
-        routing.add_row(task, task_providers.get(task, f"[dim]{default_provider} (default)[/dim]"))
+        routing.add_row(task, task_providers.get(task) or default_provider or "?")
     console.print(routing)
 
 
@@ -945,7 +966,11 @@ def ingest(
     ingest_cfg = config.get("ingest", {})
     max_source_chars = ingest_cfg.get("max_source_chars", ingest_llm.MAX_SOURCE_CHARS)
 
-    router = _build_router(paths, provider=provider)
+    router = _build_router(
+        paths,
+        provider=provider,
+        tasks=("extraction", "extraction_retry", "draft"),
+    )
 
     mode = "batch" if batch else "interactive"
     thinking = not no_thinking
@@ -1231,7 +1256,11 @@ def query(
         raise typer.Exit(code=1)
 
     # Build the provider router and verify reachability
-    router = _build_router(paths, provider=provider)
+    router = _build_router(
+        paths,
+        provider=provider,
+        tasks=("intent_classify", "chitchat", "synthesis"),
+    )
 
     callbacks = CliQueryCallbacks()
     try:
@@ -1450,6 +1479,7 @@ def lint(
         router = _build_router(
             paths,
             provider=provider,
+            tasks=("contradiction",),
             fail_hint="Fast-only lint still works without an LLM — omit --deep.",
         )
 

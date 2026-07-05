@@ -598,6 +598,10 @@ class LLMRouter:
         name = self.provider_for(task)
         return resolve_llm_options(self._profile(name), task=task, **overrides)
 
+    def model_for(self, task: str | None = None) -> str:
+        """The model string of the provider that will handle this task."""
+        return self._profile(self.provider_for(task)).get("model", "?")
+
     def thinking_default(self, task: str | None = None, fallback: bool = False) -> bool:
         return bool(self._profile(self.provider_for(task)).get("thinking", fallback))
 
