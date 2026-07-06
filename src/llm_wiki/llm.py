@@ -20,7 +20,9 @@ orchestrate multi-pass pipelines.
 
 from __future__ import annotations
 
+import glob
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -540,7 +542,54 @@ class _AuthError(LLMError):
 
 # Substrings (case-insensitive) in CLI stderr/result that mean "not logged in".
 _CLI_AUTH_PATTERNS = ("log in", "login", "unauthenticated", "not authenticated",
-                      "authentication", "oauth", "invalid api key", "please run `claude`")
+                      "authentication", "oauth", "invalid api key", "please run `claude`",
+                      "401", "unauthorized", "missing bearer")
+
+
+def _resolve_codex_binary() -> str | None:
+    """Locate the `codex` executable, which is not always on PATH.
+
+    On Windows the OpenAI Codex CLI installs a versioned binary under
+    %LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<hash>\\codex.exe rather than on PATH.
+    """
+    found = shutil.which("codex")
+    if found:
+        return found
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        cands = [
+            c for c in glob.glob(os.path.join(base, "OpenAI", "Codex", "bin", "*", "codex.exe"))
+            if os.path.isfile(c)
+        ]
+        if cands:
+            return max(cands, key=os.path.getmtime)  # newest install
+    return None
+
+
+def resolve_cli_binary(ptype: str, command: str | None = None) -> str | None:
+    """Resolve the executable path for an agent-CLI provider profile.
+
+    An explicit `command` (a path or a name on PATH) wins; otherwise fall back
+    to the per-type discovery.
+    """
+    if command:
+        return command if os.path.isfile(command) else shutil.which(command)
+    if ptype == "claude-code":
+        return shutil.which("claude")
+    if ptype == "codex":
+        return _resolve_codex_binary()
+    return None
+
+
+def _messages_to_prompt(messages: list[ChatMessage]) -> str:
+    """Flatten a conversation into a single prompt string (for `codex exec`)."""
+    parts: list[str] = []
+    for m in messages:
+        if m.role == "assistant":
+            parts.append(f"[Your previous reply]\n{m.content}")
+        else:  # system + user both contribute plain text; system leads the list
+            parts.append(m.content)
+    return "\n\n".join(parts)
 
 
 class ClaudeCliClient:
@@ -563,12 +612,13 @@ class ClaudeCliClient:
         self,
         model: str = "",
         isolated: bool = True,
+        command: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ):
         self.model = (model or "").strip()
         self.isolated = isolated
         self.timeout = timeout
-        self.binary = shutil.which(self.BINARY)
+        self.binary = resolve_cli_binary("claude-code", command)
 
     def close(self) -> None:
         pass
@@ -748,6 +798,179 @@ class ClaudeCliClient:
             )
 
 
+class CodexCliClient:
+    """Drives the local OpenAI `codex` CLI (`codex exec`) as a provider (no key).
+
+    Runs `codex exec --json`, feeding the flattened prompt on stdin and reading
+    JSONL events: `item.completed` with item type `agent_message` carries the
+    answer (item type `reasoning` is the model's private thinking — ignored),
+    and `-o` writes the authoritative final message. Auth is whatever
+    `codex login` set up. Like the Claude client, `thinking`/`json_mode`/sampling
+    are accepted but ignored. Runs read-only in a temp dir so it never edits the
+    user's files.
+    """
+
+    def __init__(
+        self,
+        model: str = "",
+        isolated: bool = True,
+        command: str | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ):
+        self.model = (model or "").strip()
+        self.isolated = isolated
+        self.timeout = timeout
+        self.binary = resolve_cli_binary("codex", command)
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "CodexCliClient":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+    # -- health -------------------------------------------------------------
+
+    def ensure_ready(self) -> None:
+        if not self.binary:
+            raise ModelNotFound(
+                "OpenAI Codex CLI ('codex') not found.\n"
+                "Install it, then run `codex login` once to authenticate."
+            )
+
+    def probe(self) -> str:
+        """'Test' button: confirm codex is found AND logged in via a tiny call."""
+        self.ensure_ready()
+        self.chat([ChatMessage(role="user", content="Reply with the single word: ok")])
+        model = self.model or "(CLI default)"
+        return f"Found codex at {self.binary} · authenticated · model {model}."
+
+    def list_models(self) -> list[str]:
+        return [self.model] if self.model else []
+
+    # -- request assembly ---------------------------------------------------
+
+    def _command(self, last_file: str) -> list[str]:
+        cmd = [
+            self.binary, "exec", "--json",
+            "--skip-git-repo-check",  # wiki root / temp dir isn't a git repo
+            "--ephemeral",            # don't persist session files
+            "-s", "read-only",        # never let the agent modify files
+            "-o", last_file,          # final message written here (authoritative)
+        ]
+        if self.model:
+            cmd += ["-m", self.model]
+        return cmd
+
+    # -- chat ---------------------------------------------------------------
+
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        thinking: bool = False,
+        json_mode: bool = False,
+        **options,
+    ) -> str:
+        return "".join(self._run(messages))
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        thinking: bool = False,
+        **options,
+    ) -> Generator[str, None, str]:
+        parts: list[str] = []
+        for chunk in self._run(messages):
+            parts.append(chunk)
+            yield chunk
+        return "".join(parts)
+
+    def _run(self, messages: list[ChatMessage]) -> Generator[str, None, None]:
+        self.ensure_ready()
+        fd, last_path = tempfile.mkstemp(suffix="-codex-last.txt")
+        os.close(fd)
+        proc = subprocess.Popen(
+            self._command(last_path),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=tempfile.gettempdir() if self.isolated else None,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        timer = threading.Timer(self.timeout, proc.kill)
+        timer.start()
+        emitted = False
+        errors: list[str] = []
+        stderr = ""
+        try:
+            proc.stdin.write(_messages_to_prompt(messages))
+            proc.stdin.close()
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # e.g. the "Reading prompt from stdin..." banner
+                etype = event.get("type")
+                if etype == "item.completed":
+                    item = event.get("item", {})
+                    itype = item.get("type")
+                    if itype == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            emitted = True
+                            yield text
+                    elif itype == "error":
+                        errors.append(item.get("message", ""))
+                elif etype == "error":
+                    errors.append(event.get("message", ""))
+            stderr = proc.stderr.read()
+            proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+
+        # Authoritative final text (fallback if no agent_message streamed).
+        last_text = ""
+        try:
+            with open(last_path, encoding="utf-8", errors="replace") as f:
+                last_text = f.read().strip()
+        except OSError:
+            pass
+        finally:
+            try:
+                os.unlink(last_path)
+            except OSError:
+                pass
+        if not emitted and last_text:
+            emitted = True
+            yield last_text
+
+        # A run that produced text succeeded, even if it logged transient
+        # reconnect errors. Only diagnose failure when we got nothing.
+        if not emitted:
+            detail = (" ".join(e for e in errors if e) or stderr or "").strip()
+            low = detail.lower()
+            if any(p in low for p in _CLI_AUTH_PATTERNS):
+                raise _AuthError(
+                    "codex is not logged in (or its session expired). "
+                    "Run `codex login`, then retry."
+                )
+            raise LLMError(
+                f"codex exec failed (exit {proc.returncode}): {detail[:300] or 'no output'}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Factory + router
 # ---------------------------------------------------------------------------
@@ -761,6 +984,14 @@ def make_client(profile: dict, *, timeout: float = DEFAULT_TIMEOUT):
         return ClaudeCliClient(
             model=profile.get("model", ""),
             isolated=profile.get("isolated", True),
+            command=profile.get("command"),
+            timeout=timeout,
+        )
+    if ptype == "codex":
+        return CodexCliClient(
+            model=profile.get("model", ""),
+            isolated=profile.get("isolated", True),
+            command=profile.get("command"),
             timeout=timeout,
         )
     if ptype == "ollama-native":

@@ -114,7 +114,7 @@ LLM_TASKS = (
 # else at a profile's top level (and under its `tasks.<task>`) is passed through
 # to the client as a sampling parameter in that provider's own vocabulary.
 PROVIDER_RESERVED_KEYS = frozenset(
-    {"type", "model", "host", "api_base", "api_key_env", "isolated",
+    {"type", "model", "host", "api_base", "api_key_env", "isolated", "command",
      "thinking", "tasks", "timeout"}
 )
 
@@ -189,6 +189,14 @@ PROVIDER_TYPE_PRESETS: dict = {
         "endpoint_label": "",
         "endpoint_placeholder": "",
     },
+    "codex": {
+        "label": "Codex (no API key)",
+        "type": "codex",
+        "model_prefix": "",  # model passes straight to `codex exec -m`
+        "endpoint_field": None,
+        "endpoint_label": "",
+        "endpoint_placeholder": "",
+    },
     "custom": {
         "label": "Custom (full LiteLLM model string)",
         "type": "litellm",
@@ -200,7 +208,7 @@ PROVIDER_TYPE_PRESETS: dict = {
 }
 
 # Provider types that run a local agent CLI (no API key, no HTTP endpoint).
-CLI_PROVIDER_TYPES = frozenset({"claude-code"})
+CLI_PROVIDER_TYPES = frozenset({"claude-code", "codex"})
 
 
 def build_provider_profile(

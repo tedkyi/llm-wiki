@@ -62,9 +62,9 @@
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                 <label class="block">
-                    <span class="text-sm text-[#9ca3af]">Model{% if p.is_cli %} <span class="text-xs text-[#6b7280]">(alias like sonnet/opus/haiku, or blank for the CLI default)</span>{% endif %}</span>
+                    <span class="text-sm text-[#9ca3af]">Model{% if p.is_cli %} <span class="text-xs text-[#6b7280]">(model name/alias, or blank for the {{ p.cli_name }} default)</span>{% endif %}</span>
                     <input type="text" name="model__{{ p.name }}" value="{{ p.model }}"
-                           placeholder="{% if p.is_cli %}sonnet{% endif %}"
+                           placeholder="{% if p.type == 'claude-code' %}sonnet / opus / haiku{% elif p.is_cli %}(CLI default){% endif %}"
                            class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
                 </label>
                 {% if p.has_endpoint %}
@@ -87,7 +87,7 @@
                 <label class="flex items-center gap-2 sm:col-span-2 mt-1">
                     <input type="checkbox" name="iso__{{ p.name }}" {% if p.isolated %}checked{% endif %}
                            class="rounded border-[#2a2e3a] bg-[#161922]">
-                    <span class="text-sm text-[#9ca3af]">Isolated <span class="text-xs text-[#6b7280]">— don't load your personal MCP servers, CLAUDE.md, or slash commands into wiki runs (recommended)</span></span>
+                    <span class="text-sm text-[#9ca3af]">Isolated <span class="text-xs text-[#6b7280]">— don't load your personal agent config/context (MCP servers, CLAUDE.md/AGENTS.md, skills) into wiki runs (recommended)</span></span>
                 </label>
                 {% endif %}
             </div>
@@ -103,8 +103,8 @@
             <!-- API key / CLI status -->
             {% if p.key_mode == 'cli' %}
             <p class="text-xs pt-3 border-t border-[#2a2e3a] text-[#9ca3af]">CLI
-                {% if p.cli_path %}<span class="font-mono text-[#7ee2a0]">{{ p.cli_path }}</span> <span class="text-[#7ee2a0]">· found</span>{% else %}<span class="text-[#f0a0a0]">claude not found on PATH</span>{% endif %}
-                <span class="text-[#6b7280]">— no API key; uses your <span class="font-mono">claude</span> login. Click Test to verify auth.</span>
+                {% if p.cli_path %}<span class="font-mono text-[#7ee2a0]">{{ p.cli_path }}</span> <span class="text-[#7ee2a0]">· found</span>{% else %}<span class="text-[#f0a0a0]">{{ p.cli_name }} not found</span>{% endif %}
+                <span class="text-[#6b7280]">— no API key; uses your <span class="font-mono">{{ p.cli_name }}</span> login. Click Test to verify auth.</span>
             </p>
             {% elif p.key_mode == 'env' %}
             <p class="text-xs pt-3 border-t border-[#2a2e3a] text-[#9ca3af]">API key <span class="font-mono">${{ p.api_key_env }}</span>
@@ -245,7 +245,7 @@ const TYPE_PRESETS = {
         }
         if (modelInput) {
             modelInput.placeholder = p.cli
-                ? 'sonnet / opus / haiku — or blank for the CLI default'
+                ? 'model name/alias — or blank for the CLI default'
                 : 'e.g. gpt-4o, claude-opus-4-8, meta-llama/Llama-3-8B';
         }
     }

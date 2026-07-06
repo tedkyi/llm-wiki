@@ -14,14 +14,19 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ... import config as cfg
 from ... import credentials
-from ...llm import LLMError, ModelNotFound, OllamaNotRunning, make_client
+from ...llm import (
+    LLMError,
+    ModelNotFound,
+    OllamaNotRunning,
+    make_client,
+    resolve_cli_binary,
+)
 
 router = APIRouter()
 
@@ -61,12 +66,13 @@ def _settings_context(paths: cfg.WikiPaths, **extra) -> dict:
         else:
             key_mode = "none"
         # For agent-CLI providers, resolve the binary path (the analog of a URL).
-        cli_path = shutil.which("claude") if ptype == "claude-code" else None
+        cli_path = resolve_cli_binary(ptype, profile.get("command")) if is_cli else None
         profile_views.append(
             {
                 "name": name,
                 "type": ptype,
                 "is_cli": is_cli,
+                "cli_name": {"claude-code": "claude", "codex": "codex"}.get(ptype, ""),
                 "has_endpoint": not is_cli,
                 "cli_path": cli_path,
                 "isolated": bool(profile.get("isolated", True)),
@@ -203,7 +209,7 @@ async def add_provider(
     request: Request,
     name: str = Form(...),
     type: str = Form(...),
-    model: str = Form(...),
+    model: str = Form(""),  # optional at HTTP layer; required per-type in build_provider_profile
     endpoint: str = Form(""),
     api_key_env: str = Form(""),
 ) -> RedirectResponse:
