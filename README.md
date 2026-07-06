@@ -15,7 +15,7 @@ Built on the pattern Andrej Karpathy described in his [LLM Wiki gist](https://gi
 
 You never write the wiki yourself. The LLM does all the grunt work: summarizing, cross-referencing, filing, bookkeeping. You bring the sources and ask the questions.
 
-Runs 100% locally on Apple Silicon or anywhere Ollama works. No API keys, no cloud, no data leaving your machine.
+Runs **100% locally by default** — Ollama + Qwen3, no API keys, no cloud, no data leaving your machine. The LLM layer is pluggable: when you want to, route any part of the pipeline to another local backend (vLLM, LM Studio) or a cloud provider (OpenAI, Anthropic, Gemini, …). Fully local, fully cloud, or a mix — your call, per task. See [PROVIDERS.md](./PROVIDERS.md).
 
 ## What it does
 
@@ -44,6 +44,7 @@ Every ingest produces a cluster of `sources/`, `entities/`, and `concepts/` page
 - **Incremental ingest** — drop a file, run `wiki ingest`, get 8–15 cross-linked wiki pages
 - **Structured extraction** — Qwen3 identifies entities (people, organizations, places), concepts (models, techniques, architectures, ideas), and key takeaways per source, always framed around the problem being solved and its limitations
 - **Smart merging** — re-ingesting related sources updates existing entity/concept pages instead of overwriting them, preserving provenance
+- **Pluggable LLM providers** — fully local on Ollama by default; also routes to vLLM, LM Studio, OpenAI, Anthropic, Gemini (via [LiteLLM](https://litellm.ai)), or the Claude Code / Codex CLIs — configurable **per pipeline task** (see [PROVIDERS.md](./PROVIDERS.md))
 - **Hybrid search** — BM25 full-text + vector embeddings + LLM reranking (all local, via [QMD](https://github.com/tobi/qmd))
 - **3-way query scope** — `Wiki` (thematic answers from LLM-compiled pages), `Raw` (exact lookups in original documents), or `Hybrid` (both)
 - **Intent classification** — casual messages ("hi", "thanks") skip retrieval and get a quick reply, saving ~30 seconds per chitchat turn
@@ -62,6 +63,7 @@ A full web interface at `http://127.0.0.1:8000` after `wiki serve`:
 - **Query** — chat-style interface with streaming synthesis, scope toggle, save-as-synthesis button
 - **Lint** — interactive lint report with one-click auto-fix
 - **Graph** — D3 force-directed visualization of the full wiki, color-coded by page type
+- **Settings** — configure LLM providers (add profiles from presets, set per-task routing, manage API keys)
 
 ### Supported input formats
 `.pdf` · `.md` · `.html` · `.docx` · `.txt`
@@ -138,11 +140,35 @@ Indexing happens in two phases after each ingest:
 
 QMD's state is fully **per-wiki**: both `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` are pointed at `.wiki/qmd-cache/`, which holds the SQLite index, the collection registry (`index.yml`), and the downloaded GGUF models (embedder, reranker, query-expansion). Overriding only the cache would leave the collection registry global — deleting the index would then silently resurrect stale collection definitions.
 
+## Providers & models
+
+The LLM layer is **pluggable**. Every pipeline stage (extraction, drafting, synthesis, intent classification, chitchat, contradiction checks) is a named *task* that you route to a *provider profile*. Out of the box every task points at a local Ollama profile running `qwen3.6:35b` — nothing leaves your machine. Change that whenever you like:
+
+- **Other local backends** — vLLM, LM Studio, or any OpenAI-compatible server
+- **Cloud vendors** — OpenAI, Anthropic, Gemini, and other [LiteLLM](https://litellm.ai)-supported providers
+- **Local agent CLIs** — Claude Code or Codex, using their own login (no API key)
+
+Routing is **per task**, so you can, say, keep token-heavy ingest local and answer queries with a cloud model:
+
+```yaml
+# .wiki/config.yml
+llm:
+  default_provider: ollama          # local for everything by default
+  task_providers:
+    synthesis: anthropic            # …but answer queries with Claude
+  providers:
+    ollama:    { type: ollama-native, model: qwen3.6:35b, host: http://localhost:11434 }
+    anthropic: { type: litellm, model: anthropic/claude-opus-4-8, max_tokens: 8192 }
+```
+
+Manage it from the CLI (`wiki providers list` / `set-key` / `test`, `wiki query --provider`) or the web UI **Settings** page. **Full guide: [PROVIDERS.md](./PROVIDERS.md).**
+
 ## Stack
 
 | Layer | Component | Why |
 |---|---|---|
-| LLM | [Ollama](https://ollama.com) + [Qwen3.6-35B](https://ollama.com/library/qwen3) Q4_K_M | Strong reasoning, 40K context, thinking mode |
+| LLM (default) | [Ollama](https://ollama.com) + [Qwen3.6-35B](https://ollama.com/library/qwen3) Q4_K_M | Strong reasoning, 40K context, thinking mode — runs fully local |
+| Provider routing | [LiteLLM](https://litellm.ai) abstraction | Swap in vLLM, LM Studio, OpenAI, Anthropic, Gemini, Claude Code / Codex — per task |
 | Search | [QMD](https://github.com/tobi/qmd) (BM25 + vector + rerank) | All local, SQLite-backed, handles the heavy lifting |
 | Embeddings | EmbeddingGemma-300M (via QMD) | Small footprint, high quality |
 | Reranker | Qwen3-Reranker-0.6B (via QMD) | Fast cross-encoder rerank |
@@ -150,21 +176,20 @@ QMD's state is fully **per-wiki**: both `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` a
 | Parsers | pypdf, python-docx, beautifulsoup4, lxml | Cover the main document formats |
 | Vault | [Obsidian](https://obsidian.md) | Best-in-class graph view and backlink UX — you don't have to build it |
 
-No cloud services. No API keys. No data leaves your machine.
+Local by default: with the Ollama provider, no cloud services, no API keys, and no data leaves your machine. Cloud providers are strictly opt-in.
 
 ## Requirements
 
 - **Python 3.11+**
 - **Node.js 18+** (for QMD)
-- **Ollama** with the `qwen3.6:35b` model pulled (large download, tens of GB).
-  You can specify your preferred model in `config.yml`.
-- **QMD** (`npm install -g @tobilu/qmd`)
+- **QMD** (`npm install -g @tobilu/qmd`) — the local search backend
+- **An LLM provider** — for the default local setup, **Ollama** with the `qwen3.6:35b` model pulled (large download, tens of GB). You can point tasks at a smaller local model or a cloud provider instead; see [PROVIDERS.md](./PROVIDERS.md).
 - **Homebrew SQLite** on macOS (`brew install sqlite`)
-- **~30GB free disk space** for models and embeddings
-- **~24GB RAM** recommended (32GB+ for comfort)
+- **~30GB free disk space** for models and embeddings (much less if you use a cloud provider for inference and only run QMD's embed/rerank models locally)
+- **~24GB RAM** recommended for the default local LLM (32GB+ for comfort); far less if inference runs in the cloud
 - **Obsidian** (optional but strongly recommended for browsing)
 
-Tested on macOS (Apple Silicon, M3 Pro 18GB). Should work on Linux; Windows untested.
+Developed and tested on macOS (Apple Silicon, M3 Pro 18GB). Also runs on Windows and should work on Linux.
 
 ## Installation
 
@@ -230,13 +255,16 @@ open wiki/   # then "Open folder as vault"
 | `wiki sources rm <id>` | Remove a source from tracking |
 | `wiki ingest [source_id]` | Run the 3-pass LLM ingest pipeline |
 | `wiki reingest <source_id>` | Reset a source to `pending` so the next `wiki ingest` reprocesses it |
-| `wiki query "<question>" [--scope wiki\|raw\|hybrid] [--types <t1,t2>] [--save-as <slug>]` | Search + synthesize a cited answer |
+| `wiki query "<question>" [--scope wiki\|raw\|hybrid] [--mode hybrid\|lex\|vec] [--types <t1,t2>] [--provider <name>] [--save-as <slug>]` | Search + synthesize a cited answer |
 | `wiki reindex [--full]` | Force rebuild of the QMD search index (`--full`: delete index, backfill raw-text mirrors, re-embed everything) |
 | `wiki lint [--deep] [--fix]` | Health-check the wiki |
+| `wiki providers list` | Show configured LLM providers, per-task routing, and API-key status |
+| `wiki providers set-key <vendor>` | Store a cloud provider's API key in the OS keyring |
+| `wiki providers test <provider>` | Check that a provider profile is reachable / authenticated |
 | `wiki status` | Show project stats, paths, config, backend health |
 | `wiki serve [--port N]` | Launch the web UI at `http://127.0.0.1:8000` |
 
-Run `wiki <command> --help` for full options on any command. See [USAGE.md](./USAGE.md) for a full walkthrough.
+Run `wiki <command> --help` for full options on any command. See [USAGE.md](./USAGE.md) for a full walkthrough and [PROVIDERS.md](./PROVIDERS.md) for configuring LLM providers.
 
 ## Example output
 
