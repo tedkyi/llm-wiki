@@ -379,7 +379,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v1.1.1** — production-ready for personal use.
+**Current version: v1.1.2** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|

@@ -17,6 +17,7 @@ Later stages add: ingest, query, lint, serve.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,29 @@ from .llm import (
     OllamaNotRunning,
     make_client,
 )
+
+def _force_utf8_console() -> None:
+    """Make stdout/stderr encode as UTF-8 for every ``wiki`` command.
+
+    On Windows the console's default code page (e.g. cp1252) can't encode emoji
+    or many Unicode characters, so printing them — especially when output is
+    redirected to a file or pipe — raises UnicodeEncodeError and crashes the
+    command. Reconfiguring to UTF-8 with ``errors="replace"`` makes output safe
+    regardless of how the command is launched. Encoding-only: it does not affect
+    program logic or file I/O.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # e.g. stream replaced by a test harness
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_console()
+
 
 app = typer.Typer(
     name="wiki",
