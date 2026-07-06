@@ -533,6 +533,15 @@ def query(
     args = [subcmd, question, "--json", "-n", str(limit), "--full-path"]
     if min_score > 0:
         args.extend(["--min-score", str(min_score)])
+    elif mode == "vec":
+        # qmd's `vsearch` silently applies a 0.3 min-score floor when
+        # --min-score is omitted, so `--vec` drops borderline vector hits
+        # (< 0.3 cosine) that hybrid's vector arm keeps (hybrid uses floor 0).
+        # We can't pass "0": qmd computes `opts.minScore || 0.3`, and 0 is
+        # falsy in JS so it snaps right back to 0.3. A truthy value <= 0 (every
+        # vector cosine score is > 0) disables the floor and matches the pool
+        # hybrid retrieves from.
+        args.extend(["--min-score", "-1"])
     if collections:
         for col in collections:
             args.extend(["-c", col])
