@@ -45,6 +45,9 @@ You follow these conventions strictly:
    Only create [[wikilinks]] for items you are explicitly given in a related list or
    instructed to link. Never invent wikilinks for entities or concepts not in that list,
    even if you recognise them from your training data.
+   Never link a page to itself. Do not wrap the page's own title or subject name in a
+   [[wikilink]] — a page cannot reference itself. Write its own name as plain text; only
+   OTHER pages get wikilinks.
 
 3. Slugs are kebab-case lowercase ASCII (e.g. andrej-karpathy, not Karpathy.md).
    Use the canonical name. Acronyms stay together (rag, llm, not r-a-g).
@@ -194,6 +197,7 @@ Write a complete markdown page with:
 4. Use [[entities/slug]] or [[concepts/slug]] wikilinks ONLY for items explicitly listed
    in the Related section above. Do not add wikilinks for any other entity or concept,
    even if mentioned in the excerpts or known from your training data.
+   Never link this page to itself: write '{name}' as plain text, never as a [[wikilink]].
 5. End with a '## Sources' section listing [[sources/{source_slug}]]
 
 Do not invent facts. Only use information from the excerpts. Return ONLY the markdown content — no preamble, no code fences.
@@ -216,6 +220,7 @@ Write a complete markdown page with:
    - Why it matters
    - How it relates to other concepts/entities (use [[entities/slug]] or [[concepts/slug]] wikilinks
      ONLY for items explicitly listed in the Related section above)
+   Never link this page to itself: write '{name}' as plain text, never as a [[wikilink]].
 4. End with a '## Sources' section listing [[sources/{source_slug}]]
 
 Do not invent facts. Only use information from the excerpts. Return ONLY the markdown content — no preamble, no code fences.
