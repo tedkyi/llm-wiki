@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -48,18 +49,27 @@ def _settings_context(paths: cfg.WikiPaths, **extra) -> dict:
         advanced = {k: v for k, v in profile.items() if k not in _DEDICATED_KEYS}
         vendor = credentials.vendor_for_model(profile.get("model", ""))
         ptype = profile.get("type", "")
+        is_cli = ptype in cfg.CLI_PROVIDER_TYPES
         api_key_env = profile.get("api_key_env", "")
-        # Key mode: "env" (named env var), "vendor" (keyring/vendor env), or "none".
-        if api_key_env:
+        # Key mode: "cli" (agent login), "env", "vendor", or "none".
+        if is_cli:
+            key_mode = "cli"
+        elif api_key_env:
             key_mode = "env"
         elif credentials.needs_key(vendor):
             key_mode = "vendor"
         else:
             key_mode = "none"
+        # For agent-CLI providers, resolve the binary path (the analog of a URL).
+        cli_path = shutil.which("claude") if ptype == "claude-code" else None
         profile_views.append(
             {
                 "name": name,
                 "type": ptype,
+                "is_cli": is_cli,
+                "has_endpoint": not is_cli,
+                "cli_path": cli_path,
+                "isolated": bool(profile.get("isolated", True)),
                 "model": profile.get("model", ""),
                 "endpoint": profile.get("host") or profile.get("api_base") or "",
                 "endpoint_label": "Host" if ptype == "ollama-native" else "API base",
@@ -101,6 +111,7 @@ def _settings_context(paths: cfg.WikiPaths, **extra) -> dict:
                 "endpoint_field": p["endpoint_field"],
                 "endpoint_label": p["endpoint_label"],
                 "endpoint_placeholder": p["endpoint_placeholder"],
+                "cli": p["type"] in cfg.CLI_PROVIDER_TYPES,
             }
             for pid, p in cfg.PROVIDER_TYPE_PRESETS.items()
         ],
@@ -146,6 +157,9 @@ async def save_settings(request: Request) -> RedirectResponse:
         model = form.get(f"model__{name}")
         if model is not None:
             profile["model"] = model.strip()
+        # Isolation toggle for agent-CLI providers (checkbox: absent = off).
+        if profile.get("type") in cfg.CLI_PROVIDER_TYPES:
+            profile["isolated"] = f"iso__{name}" in form
         endpoint = form.get(f"endpoint__{name}")
         if endpoint is not None:
             field = "host" if profile.get("type") == "ollama-native" else "api_base"
@@ -279,9 +293,11 @@ async def test_provider(request: Request, provider: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Unknown provider '{provider}'."})
     client = make_client(providers[provider])
     try:
-        client.ensure_ready()
+        # probe() does the most meaningful available check per provider type
+        # (Ollama reachability, key presence, or a live agent-CLI auth round-trip).
+        message = client.probe()
     except (OllamaNotRunning, ModelNotFound, LLMError) as e:
         return JSONResponse({"ok": False, "message": str(e)})
     finally:
         client.close()
-    return JSONResponse({"ok": True, "message": f"'{provider}' is ready."})
+    return JSONResponse({"ok": True, "message": message})

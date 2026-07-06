@@ -114,7 +114,8 @@ LLM_TASKS = (
 # else at a profile's top level (and under its `tasks.<task>`) is passed through
 # to the client as a sampling parameter in that provider's own vocabulary.
 PROVIDER_RESERVED_KEYS = frozenset(
-    {"type", "model", "host", "api_base", "api_key_env", "thinking", "tasks", "timeout"}
+    {"type", "model", "host", "api_base", "api_key_env", "isolated",
+     "thinking", "tasks", "timeout"}
 )
 
 # Friendly provider "type" presets for the settings UI. Each maps a
@@ -180,6 +181,14 @@ PROVIDER_TYPE_PRESETS: dict = {
         "endpoint_label": "",
         "endpoint_placeholder": "",
     },
+    "claude-code": {
+        "label": "Claude Code (no API key)",
+        "type": "claude-code",
+        "model_prefix": "",  # model passes straight to `claude --model`
+        "endpoint_field": None,
+        "endpoint_label": "",
+        "endpoint_placeholder": "",
+    },
     "custom": {
         "label": "Custom (full LiteLLM model string)",
         "type": "litellm",
@@ -189,6 +198,9 @@ PROVIDER_TYPE_PRESETS: dict = {
         "endpoint_placeholder": "",
     },
 }
+
+# Provider types that run a local agent CLI (no API key, no HTTP endpoint).
+CLI_PROVIDER_TYPES = frozenset({"claude-code"})
 
 
 def build_provider_profile(
@@ -205,18 +217,23 @@ def build_provider_profile(
     preset = PROVIDER_TYPE_PRESETS.get(preset_id)
     if preset is None:
         raise ValueError(f"Unknown provider type '{preset_id}'.")
+    ptype = preset["type"]
     model = (model or "").strip()
-    if not model:
+    # Agent-CLI providers may leave the model blank (use the CLI's default).
+    if not model and ptype not in CLI_PROVIDER_TYPES:
         raise ValueError("Model is required.")
     prefix = preset["model_prefix"]
     if prefix and not model.startswith(prefix):
         model = prefix + model
-    profile: dict = {"type": preset["type"], "model": model, "tasks": {}}
+    profile: dict = {"type": ptype, "model": model, "tasks": {}}
     field = preset["endpoint_field"]
     if field and endpoint.strip():
         profile[field] = endpoint.strip()
     if api_key_env.strip():
         profile["api_key_env"] = api_key_env.strip()
+    if ptype in CLI_PROVIDER_TYPES:
+        # Default to an isolated run (no personal MCP/CLAUDE.md/slash commands).
+        profile["isolated"] = True
     return profile
 
 DEFAULT_CONFIG: dict = {

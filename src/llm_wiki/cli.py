@@ -776,9 +776,9 @@ def providers_test(
         raise typer.Exit(code=1)
     client = make_client(providers[provider])
     console.print()
-    console.print(f"[dim]Testing '{provider}' ({client.model})…[/dim]")
+    console.print(f"[dim]Testing '{provider}' ({client.model or 'default'})…[/dim]")
     try:
-        client.ensure_ready()
+        message = client.probe()
     except (OllamaNotRunning, ModelNotFound) as e:
         _err(str(e))
         raise typer.Exit(code=1)
@@ -787,7 +787,7 @@ def providers_test(
         raise typer.Exit(code=1)
     finally:
         client.close()
-    _ok(f"Provider '{provider}' is ready.")
+    _ok(f"Provider '{provider}': {message}")
 
 
 @app.command()
@@ -892,7 +892,9 @@ class CliIngestCallbacks(ingest_llm.IngestCallbacks):
 
     def on_stream_chunk(self, chunk: str) -> None:
         if self._stream_active:
-            console.print(chunk, end="", style="dim", highlight=False)
+            # markup=False: raw LLM text (e.g. [[wikilinks]]) is not rich markup —
+            # otherwise rich parses [..] as style tags and drops the contents.
+            console.print(chunk, end="", style="dim", highlight=False, markup=False)
             self._stream_char_count += len(chunk)
 
     def on_page_written(self, page: ingest_llm.PageChange) -> None:
@@ -1089,7 +1091,7 @@ class CliQueryCallbacks(query_module.QueryCallbacks):
     def on_chitchat_reply(self, reply: str) -> None:
         console.print()
         console.print("[dim]" + "─" * 72 + "[/dim]")
-        console.print(reply)
+        console.print(reply, markup=False)  # raw LLM text, not rich markup
         console.print("[dim]" + "─" * 72 + "[/dim]")
         console.print()
 
@@ -1123,7 +1125,8 @@ class CliQueryCallbacks(query_module.QueryCallbacks):
 
     def on_stream_chunk(self, chunk: str) -> None:
         if self._stream_active:
-            console.print(chunk, end="", highlight=False)
+            # markup=False so [[wikilinks]] aren't parsed as rich style tags.
+            console.print(chunk, end="", highlight=False, markup=False)
 
     def on_saved(self, saved_path: str) -> None:
         if self._stream_active:

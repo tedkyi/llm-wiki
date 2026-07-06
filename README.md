@@ -351,7 +351,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v1.0.0** — production-ready for personal use.
+**Current version: v1.1.1** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -366,6 +366,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 | 9 (v0.9.0) | Focus on research problem and limitations. Proper extraction JSON and document formatting. Auto-reindex after ingest and lint (BM25 updates immediately, vector embeddings build in the background) | ✅ Done |
 | 9.1 (v0.9.1) | `wiki reingest`, stabilize with retry-with-backoff, per-source diagnostic logs | ✅ Done |
 | 10 (v1.0.0) | Major overhaul of indexing; uses raw text from parser instead of raw file. Also exposed LLM settings to `config.yml` | ✅ Done |
+| 11 (v1.1.1) | Support multiple providers, local and cloud. Configurable providers per task. | ✅ Done |
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)

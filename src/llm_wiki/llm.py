@@ -22,6 +22,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Generator
 
@@ -32,6 +37,9 @@ from . import credentials
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3.6:35b"
+
+# Suppress the console-window flash when spawning a CLI subprocess on Windows.
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 DEFAULT_TIMEOUT = 300.0  # 5 minutes — thinking-mode extraction can be slow
 
 _OLLAMA_VENDORS = ("ollama", "ollama_chat")
@@ -215,6 +223,11 @@ class OllamaClient:
     def ensure_ready(self) -> None:
         """Verify Ollama is running and the configured model is available."""
         _ensure_ollama_model(self.host, self.model)
+
+    def probe(self) -> str:
+        """Verify reachability for the settings 'Test' button; return a message."""
+        self.ensure_ready()
+        return f"Reachable at {self.host} · model '{self.model}' available."
 
     # -- chat (non-streaming) ----------------------------------------------
 
@@ -407,6 +420,12 @@ class LiteLLMClient:
                     f"Cannot reach the inference server at {self.api_base}."
                 ) from e
 
+    def probe(self) -> str:
+        """Verify reachability/auth for the settings 'Test' button."""
+        self.ensure_ready()
+        where = f" at {self.api_base}" if self.api_base else ""
+        return f"Ready · {self.model}{where}."
+
     # -- request assembly ---------------------------------------------------
 
     def _thinking_kwargs(self, thinking: bool) -> dict:
@@ -510,6 +529,226 @@ class LiteLLMClient:
 
 
 # ---------------------------------------------------------------------------
+# Local agent-CLI transport (Claude Code / Codex) — no API key, rides the CLI's
+# own OAuth login. Spawns the CLI in headless stream-json mode and reads events.
+# ---------------------------------------------------------------------------
+
+
+class _AuthError(LLMError):
+    """The agent CLI is installed but not logged in."""
+
+
+# Substrings (case-insensitive) in CLI stderr/result that mean "not logged in".
+_CLI_AUTH_PATTERNS = ("log in", "login", "unauthenticated", "not authenticated",
+                      "authentication", "oauth", "invalid api key", "please run `claude`")
+
+
+class ClaudeCliClient:
+    """Drives a locally installed `claude` CLI as an LLM provider (no API key).
+
+    Spawns `claude -p --output-format stream-json --input-format stream-json`,
+    writes the conversation to stdin (one JSON event per line), and reads the
+    streamed events back. Auth is whatever `claude login` already set up — this
+    client never sees a key. `thinking`, `json_mode`, and sampling options are
+    accepted for interface compatibility but ignored (the CLI has no flags for
+    them); structured tasks rely on prompt wording + the ingest JSON parser.
+
+    Codex will be a sibling with the same shape but a different arg list and
+    event schema.
+    """
+
+    BINARY = "claude"
+
+    def __init__(
+        self,
+        model: str = "",
+        isolated: bool = True,
+        timeout: float = DEFAULT_TIMEOUT,
+    ):
+        self.model = (model or "").strip()
+        self.isolated = isolated
+        self.timeout = timeout
+        self.binary = shutil.which(self.BINARY)
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "ClaudeCliClient":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+    # -- health -------------------------------------------------------------
+
+    def ensure_ready(self) -> None:
+        """Cheap pre-run check: the CLI is installed. Auth is verified lazily."""
+        if not self.binary:
+            raise ModelNotFound(
+                f"Claude Code CLI ('{self.BINARY}') not found on PATH.\n"
+                f"Install it, then run `{self.BINARY}` once to log in."
+            )
+
+    def probe(self) -> str:
+        """'Test' button: confirm the CLI is found AND logged in via a tiny call."""
+        self.ensure_ready()
+        # A 1-token round-trip is the only real way to verify the OAuth session.
+        self.chat([ChatMessage(role="user", content="Reply with the single word: ok")])
+        model = self.model or "(CLI default)"
+        return f"Found {self.BINARY} at {self.binary} · authenticated · model {model}."
+
+    def list_models(self) -> list[str]:
+        return [self.model] if self.model else []
+
+    # -- request assembly ---------------------------------------------------
+
+    def _command(self) -> list[str]:
+        cmd = [
+            self.binary, "-p",
+            "--output-format", "stream-json",
+            "--input-format", "stream-json",
+            "--verbose", "--include-partial-messages",
+        ]
+        if self.model:
+            cmd += ["--model", self.model]
+        if self.isolated:
+            # Don't inherit the user's MCP servers, skills/slash commands, or
+            # personal settings (CLAUDE.md etc.) into wiki-generation runs.
+            cmd += ["--strict-mcp-config", "--disable-slash-commands",
+                    "--setting-sources", ""]
+        return cmd
+
+    @staticmethod
+    def _stdin_events(messages: list[ChatMessage]) -> str:
+        """Serialize the conversation as stream-json input.
+
+        System messages are folded into a preamble on the first user turn
+        (portable across CLI versions that lack a system-prompt flag).
+        """
+        preamble = "\n\n".join(m.content for m in messages if m.role == "system")
+        lines: list[str] = []
+        used_preamble = False
+        for m in messages:
+            if m.role == "system":
+                continue
+            content = m.content
+            role = "assistant" if m.role == "assistant" else "user"
+            if role == "user" and preamble and not used_preamble:
+                content = f"{preamble}\n\n{content}"
+                used_preamble = True
+            lines.append(json.dumps({
+                "type": role,
+                "message": {"role": role, "content": [{"type": "text", "text": content}]},
+            }))
+        if preamble and not used_preamble:  # no user turn — send preamble as one
+            lines.insert(0, json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": preamble}]},
+            }))
+        return "\n".join(lines) + "\n"
+
+    # -- chat ---------------------------------------------------------------
+
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        thinking: bool = False,
+        json_mode: bool = False,
+        **options,
+    ) -> str:
+        return "".join(self._run(messages))
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        thinking: bool = False,
+        **options,
+    ) -> Generator[str, None, str]:
+        parts: list[str] = []
+        for chunk in self._run(messages):
+            parts.append(chunk)
+            yield chunk
+        return "".join(parts)
+
+    def _run(self, messages: list[ChatMessage]) -> Generator[str, None, None]:
+        """Spawn the CLI, stream text out; raise a clear error on failure/auth."""
+        self.ensure_ready()
+        proc = subprocess.Popen(
+            self._command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=tempfile.gettempdir() if self.isolated else None,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        # Watchdog so a hung CLI can't block forever.
+        timer = threading.Timer(self.timeout, proc.kill)
+        timer.start()
+        try:
+            proc.stdin.write(self._stdin_events(messages))
+            proc.stdin.close()
+
+            emitted = False
+            result_text: str | None = None
+            is_error = False
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = event.get("type")
+                if etype == "stream_event":
+                    inner = event.get("event", {})
+                    if inner.get("type") == "content_block_delta":
+                        delta = inner.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                emitted = True
+                                yield text
+                elif etype == "result":
+                    is_error = bool(event.get("is_error"))
+                    result_text = event.get("result")
+            stderr = proc.stderr.read()
+            proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+
+        # Fallback: no token deltas seen (older CLI / no partial support) — emit
+        # the authoritative final text from the result event as one chunk.
+        if not emitted and result_text:
+            yield result_text
+
+        if proc.returncode not in (0, None) or is_error:
+            detail = (stderr or result_text or "").strip()
+            low = detail.lower()
+            if any(p in low for p in _CLI_AUTH_PATTERNS):
+                raise _AuthError(
+                    f"{self.BINARY} is not logged in. Run `{self.BINARY}` in a "
+                    f"terminal and complete `/login`, then retry."
+                )
+            raise LLMError(
+                f"{self.BINARY} CLI failed (exit {proc.returncode}): "
+                f"{detail[:300] or 'no output'}"
+            )
+        if not emitted and not result_text:
+            raise LLMError(
+                f"{self.BINARY} produced no output. "
+                f"Check `{self.BINARY}` runs in a terminal."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Factory + router
 # ---------------------------------------------------------------------------
 
@@ -518,6 +757,12 @@ def make_client(profile: dict, *, timeout: float = DEFAULT_TIMEOUT):
     """Build the right client for a provider profile, dispatching on `type`."""
     ptype = profile.get("type", "ollama-native")
     model = profile.get("model", DEFAULT_MODEL)
+    if ptype == "claude-code":
+        return ClaudeCliClient(
+            model=profile.get("model", ""),
+            isolated=profile.get("isolated", True),
+            timeout=timeout,
+        )
     if ptype == "ollama-native":
         return OllamaClient(
             host=profile.get("host", DEFAULT_HOST), model=model, timeout=timeout

@@ -172,6 +172,10 @@ def resolve_profile_key(profile: dict) -> str | None:
 
 def profile_needs_key(profile: dict) -> bool:
     """Whether a profile requires an API key (explicit env var, or cloud vendor)."""
+    from .config import CLI_PROVIDER_TYPES
+
+    if profile.get("type") in CLI_PROVIDER_TYPES:
+        return False  # agent CLIs authenticate via their own login, no key
     if profile.get("api_key_env"):
         return True
     return needs_key(vendor_for_model(profile.get("model", "")))
@@ -184,6 +188,10 @@ def profile_has_key(profile: dict) -> bool:
 
 def key_handle_for_profile(profile: dict) -> str | None:
     """The env-var/keyring handle a profile's key is stored under, or None."""
+    from .config import CLI_PROVIDER_TYPES
+
+    if profile.get("type") in CLI_PROVIDER_TYPES:
+        return None
     env_name = profile.get("api_key_env")
     if env_name:
         return env_name
