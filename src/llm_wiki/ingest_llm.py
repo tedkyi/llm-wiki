@@ -32,10 +32,9 @@ from . import prompts
 from . import slugify
 from .llm import (
     LLMError,
+    LLMRouter,
     ModelNotFound,
-    OllamaClient,
     OllamaNotRunning,
-    resolve_llm_options,
 )
 
 
@@ -447,18 +446,18 @@ def _auto_discover_pending(paths: cfg.WikiPaths) -> int:
 
 
 def _stream_with_retry(
-    client: OllamaClient,
+    router: LLMRouter,
     messages: list,
     callbacks: "IngestCallbacks",
     logger: "_IngestLogger | _NoopLogger",
     label: str,
-    llm_cfg: dict | None = None,
 ) -> tuple[str, float]:
     """Stream an LLM response, retrying once after 5 s on any LLMError.
 
     Returns (full_content, elapsed_seconds_of_final_successful_call).
     """
-    draft_options = resolve_llm_options(llm_cfg or {}, task="draft")
+    draft_client = router.client_for("draft")
+    draft_options = router.options_for("draft")
     for attempt in range(2):
         if attempt == 1:
             logger.info(f"LLM call failed for {label}; sleeping 5s before retry…")
@@ -467,7 +466,7 @@ def _stream_with_retry(
         _t0 = datetime.now(timezone.utc)
         try:
             full = ""
-            gen = client.chat_stream(messages, thinking=False, **draft_options)
+            gen = draft_client.chat_stream(messages, thinking=False, **draft_options)
             try:
                 while True:
                     chunk = next(gen)
@@ -491,17 +490,15 @@ def _stream_with_retry(
 def ingest_source(
     paths: cfg.WikiPaths,
     source_id: int,
-    client: OllamaClient,
+    router: LLMRouter,
     callbacks: IngestCallbacks,
     *,
-    llm_cfg: dict | None = None,
     max_source_chars: int | None = None,
     mode: str = "interactive",
     thinking_for_extraction: bool = True,
     verbose_log: bool = True,
 ) -> IngestResult:
     """Run the full 3-pass ingest pipeline on a single source."""
-    llm_cfg = llm_cfg or {}
     max_source_chars = max_source_chars if max_source_chars is not None else MAX_SOURCE_CHARS
     started = _now_iso()
 
@@ -568,11 +565,12 @@ def ingest_source(
     callbacks.on_extracting()
     extraction_messages = prompts.build_extraction_messages(parsed.title, source_text)
     logger.section("PASS 1 — EXTRACTION")
-    extraction_options = resolve_llm_options(llm_cfg, task="extraction")
+    extraction_client = router.client_for("extraction")
+    extraction_options = router.options_for("extraction")
     logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, options={extraction_options}")
     _t0 = datetime.now(timezone.utc)
     try:
-        raw_response = client.chat(
+        raw_response = extraction_client.chat(
             extraction_messages,
             thinking=thinking_for_extraction,
             json_mode=True,
@@ -600,7 +598,7 @@ def ingest_source(
         logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, options={extraction_options}")
         _t0 = datetime.now(timezone.utc)
         try:
-            raw_response = client.chat(
+            raw_response = extraction_client.chat(
                 extraction_messages,
                 thinking=thinking_for_extraction,
                 json_mode=True,
@@ -637,14 +635,15 @@ def ingest_source(
         logger.section("PASS 1 — EXTRACTION RETRY")
         logger.info("Sleeping 5s before retry…")
         time.sleep(5)
-        retry_options = resolve_llm_options(llm_cfg, task="extraction_retry")
+        retry_client = router.client_for("extraction_retry")
+        retry_options = router.options_for("extraction_retry")
         logger.info(f"LLM call start: thinking=False, json_mode=True, options={retry_options}")
         _t0 = datetime.now(timezone.utc)
         try:
             retry_messages = prompts.build_extraction_retry_messages(
                 parsed.title, source_text, raw_response
             )
-            retry_response = client.chat(
+            retry_response = retry_client.chat(
                 retry_messages,
                 thinking=False,  # retry without thinking, faster
                 json_mode=True,
@@ -771,7 +770,7 @@ def ingest_source(
                 logger.info("Sleeping 1s before LLM call…")
                 time.sleep(1)
                 logger.info("LLM call start: thinking=False, temperature=0.3")
-                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"entity {slug}", llm_cfg)
+                full, _elapsed = _stream_with_retry(router, messages, callbacks, logger, f"entity {slug}")
                 logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
                 logger.raw(f"ENTITY {slug}", full)
 
@@ -859,7 +858,7 @@ def ingest_source(
                 logger.info("Sleeping 1s before LLM call…")
                 time.sleep(1)
                 logger.info("LLM call start: thinking=False, temperature=0.3")
-                full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"concept {slug}", llm_cfg)
+                full, _elapsed = _stream_with_retry(router, messages, callbacks, logger, f"concept {slug}")
                 logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
                 logger.raw(f"CONCEPT {slug}", full)
 
@@ -928,7 +927,7 @@ def ingest_source(
             logger.info("Sleeping 1s before LLM call…")
             time.sleep(1)
             logger.info("LLM call start: thinking=False, temperature=0.3")
-            full, _elapsed = _stream_with_retry(client, messages, callbacks, logger, f"source page {source_slug}", llm_cfg)
+            full, _elapsed = _stream_with_retry(router, messages, callbacks, logger, f"source page {source_slug}")
             logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
             logger.raw(f"SOURCE PAGE {source_slug}", full)
 
@@ -1029,10 +1028,9 @@ def ingest_source(
 
 def ingest_pending(
     paths: cfg.WikiPaths,
-    client: OllamaClient,
+    router: LLMRouter,
     callbacks_factory: Callable[[], IngestCallbacks],
     *,
-    llm_cfg: dict | None = None,
     max_source_chars: int | None = None,
     mode: str = "interactive",
     auto_discover: bool = True,
@@ -1043,7 +1041,7 @@ def ingest_pending(
 
     Args:
         paths: Wiki project paths.
-        client: An active Ollama client.
+        router: An LLM provider router (see llm.LLMRouter).
         callbacks_factory: Called once per source to get a fresh callback object.
         mode: 'interactive' | 'batch'.
         auto_discover: If True, scan raw/ for untracked files first.
@@ -1067,9 +1065,8 @@ def ingest_pending(
         result = ingest_source(
             paths,
             sid,
-            client,
+            router,
             cb,
-            llm_cfg=llm_cfg,
             max_source_chars=max_source_chars,
             mode=mode,
             thinking_for_extraction=thinking_for_extraction,

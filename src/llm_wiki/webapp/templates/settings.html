@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — LLM-Wiki{% endblock %}
+
+{% block content %}
+
+<div class="mb-6">
+    <h1 class="text-3xl font-semibold text-white mb-1">Settings</h1>
+    <p class="text-sm text-[#9ca3af]">Configure inference providers, per-task routing, and API keys.</p>
+</div>
+
+{% if saved %}
+<div class="mb-4 px-4 py-2 rounded-md bg-[#16311f] border border-[#245c34] text-[#7ee2a0] text-sm">Saved.</div>
+{% endif %}
+{% if error %}
+<div class="mb-4 px-4 py-2 rounded-md bg-[#3a1c1c] border border-[#5c2424] text-[#f0a0a0] text-sm">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/settings" class="space-y-8">
+
+    <!-- Default provider + task routing -->
+    <section class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5">
+        <h2 class="text-lg font-semibold text-white mb-1">Task routing</h2>
+        <p class="text-sm text-[#9ca3af] mb-3">Choose which provider handles each pipeline task. A query or ingest run uses these unless you override the provider for that run.</p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {% for task, current in tasks %}
+            <label class="block">
+                <span class="text-sm text-[#9ca3af]">{{ task }}</span>
+                <select name="task__{{ task }}"
+                        class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 focus:outline-none">
+                    {% for name in provider_names %}
+                    <option value="{{ name }}" {% if name == current %}selected{% endif %}>{{ name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            {% endfor %}
+        </div>
+    </section>
+
+    <!-- Provider profiles -->
+    <section class="space-y-4">
+        <h2 class="text-lg font-semibold text-white">Provider profiles</h2>
+        {% for p in providers %}
+        <div class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-3">
+                    <span class="text-base font-semibold text-white">{{ p.name }}</span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-[#161922] text-[#9ca3af] border border-[#2a2e3a]">{{ p.type }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button"
+                            onclick="testProvider('{{ p.name }}', this)"
+                            class="text-xs px-3 py-1.5 bg-[#232735] hover:bg-[#2c3142] text-[#c7ccd6] rounded-md transition">Test</button>
+                    <button type="submit"
+                            name="name" value="{{ p.name }}"
+                            formaction="/settings/providers/delete" formmethod="post"
+                            onclick="return confirm('Remove provider \'{{ p.name }}\'?');"
+                            class="text-xs px-3 py-1.5 bg-[#3a1c1c] hover:bg-[#5c2424] text-[#f0a0a0] rounded-md transition">Remove</button>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                <label class="block">
+                    <span class="text-sm text-[#9ca3af]">Model{% if p.is_cli %} <span class="text-xs text-[#6b7280]">(model name/alias, or blank for the {{ p.cli_name }} default)</span>{% endif %}</span>
+                    <input type="text" name="model__{{ p.name }}" value="{{ p.model }}"
+                           placeholder="{% if p.type == 'claude-code' %}sonnet / opus / haiku{% elif p.is_cli %}(CLI default){% endif %}"
+                           class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+                </label>
+                {% if p.has_endpoint %}
+                <label class="block">
+                    <span class="text-sm text-[#9ca3af]">{{ p.endpoint_label }}</span>
+                    <input type="text" name="endpoint__{{ p.name }}" value="{{ p.endpoint }}"
+                           placeholder="{% if p.type == 'ollama-native' %}http://localhost:11434{% else %}(provider default){% endif %}"
+                           class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+                </label>
+                {% endif %}
+                {% if p.type != 'ollama-native' and not p.is_cli %}
+                <label class="block sm:col-span-2">
+                    <span class="text-sm text-[#9ca3af]">API key env var <span class="text-xs text-[#6b7280]">(optional — name of the environment variable holding this provider's key)</span></span>
+                    <input type="text" name="keyenv__{{ p.name }}" value="{{ p.api_key_env }}"
+                           placeholder="e.g. OPENROUTER_API_KEY (leave blank to use the vendor default)"
+                           class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+                </label>
+                {% endif %}
+                {% if p.is_cli %}
+                <label class="flex items-center gap-2 sm:col-span-2 mt-1">
+                    <input type="checkbox" name="iso__{{ p.name }}" {% if p.isolated %}checked{% endif %}
+                           class="rounded border-[#2a2e3a] bg-[#161922]">
+                    <span class="text-sm text-[#9ca3af]">Isolated <span class="text-xs text-[#6b7280]">— don't load your personal agent config/context (MCP servers, CLAUDE.md/AGENTS.md, skills) into wiki runs (recommended)</span></span>
+                </label>
+                {% endif %}
+            </div>
+
+            {% if not p.is_cli %}
+            <label class="block mb-3">
+                <span class="text-sm text-[#9ca3af]">Advanced — sampling defaults, <span class="font-mono">thinking</span>, and per-task overrides (JSON)</span>
+                <textarea name="advanced__{{ p.name }}" rows="8"
+                          class="mt-1 block w-full bg-[#0f1117] border border-[#2a2e3a] text-[#c7ccd6] text-xs rounded-md px-3 py-2 font-mono focus:outline-none">{{ p.advanced_json }}</textarea>
+            </label>
+            {% endif %}
+
+            <!-- API key / CLI status -->
+            {% if p.key_mode == 'cli' %}
+            <p class="text-xs pt-3 border-t border-[#2a2e3a] text-[#9ca3af]">CLI
+                {% if p.cli_path %}<span class="font-mono text-[#7ee2a0]">{{ p.cli_path }}</span> <span class="text-[#7ee2a0]">· found</span>{% else %}<span class="text-[#f0a0a0]">{{ p.cli_name }} not found</span>{% endif %}
+                <span class="text-[#6b7280]">— no API key; uses your <span class="font-mono">{{ p.cli_name }}</span> login. Click Test to verify auth.</span>
+            </p>
+            {% elif p.key_mode == 'env' %}
+            <p class="text-xs pt-3 border-t border-[#2a2e3a] text-[#9ca3af]">API key <span class="font-mono">${{ p.api_key_env }}</span>
+                {% if p.has_key %}<span class="text-[#7ee2a0]">· set</span>{% else %}<span class="text-[#f0a0a0]">· missing</span>{% endif %}
+                <span class="text-[#6b7280]">— from environment / .env, or “API keys” below</span>
+            </p>
+            {% elif p.key_mode == 'vendor' %}
+            <p class="text-xs pt-3 border-t border-[#2a2e3a] text-[#9ca3af]">API key <span class="font-mono">({{ p.vendor }})</span>
+                {% if p.has_key %}<span class="text-[#7ee2a0]">· set</span>{% else %}<span class="text-[#f0a0a0]">· missing</span>{% endif %}
+                <span class="text-[#6b7280]">— managed under “API keys” below</span>
+            </p>
+            {% else %}
+            <p class="text-xs text-[#6b7280] pt-3 border-t border-[#2a2e3a]">Local provider — no API key required.</p>
+            {% endif %}
+
+            <div id="test-result-{{ p.name }}" class="text-xs mt-2"></div>
+        </div>
+        {% endfor %}
+    </section>
+
+    <button type="submit"
+            class="px-5 py-2 bg-[#7c8cff] hover:bg-[#9aa7ff] text-white rounded-md font-medium transition">
+        Save settings
+    </button>
+</form>
+
+<!-- Add a new provider (own form — a distinct POST) -->
+<section class="mt-8">
+    <h2 class="text-lg font-semibold text-white mb-3">Add a provider</h2>
+    <p class="text-sm text-[#9ca3af] mb-3">Add any OpenAI-compatible server (vLLM, LM Studio, …) or vendor. Use a distinct name to run several models from the same vendor. After adding, set sampling/routing above and (for cloud vendors) the API key below.</p>
+    <form method="post" action="/settings/providers/add" class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <label class="block">
+            <span class="text-sm text-[#9ca3af]">Name</span>
+            <input type="text" name="name" placeholder="e.g. vllm-llama, opus-big"
+                   class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 focus:outline-none">
+        </label>
+        <label class="block">
+            <span class="text-sm text-[#9ca3af]">Type</span>
+            <select name="type" id="add-type"
+                    class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 focus:outline-none">
+                {% for t in type_presets %}
+                <option value="{{ t.id }}">{{ t.label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="block">
+            <span class="text-sm text-[#9ca3af]">Model</span>
+            <input type="text" name="model" id="add-model" placeholder="e.g. gpt-4o, claude-opus-4-8, meta-llama/Llama-3-8B"
+                   class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+        </label>
+        <label class="block" id="add-endpoint-wrap">
+            <span class="text-sm text-[#9ca3af]" id="add-endpoint-label">API base</span>
+            <input type="text" name="endpoint" id="add-endpoint" placeholder=""
+                   class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+        </label>
+        <label class="block sm:col-span-2" id="add-keyenv-wrap">
+            <span class="text-sm text-[#9ca3af]">API key env var <span class="text-xs text-[#6b7280]">(optional)</span></span>
+            <input type="text" name="api_key_env" placeholder="e.g. OPENROUTER_API_KEY — leave blank for local or vendor-default"
+                   class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 font-mono focus:outline-none">
+        </label>
+        <div class="sm:col-span-2">
+            <button type="submit"
+                    class="px-5 py-2 bg-[#7c8cff] hover:bg-[#9aa7ff] text-white rounded-md font-medium transition">
+                Add provider
+            </button>
+        </div>
+    </form>
+</section>
+
+<!-- API-key management (separate forms — keys go to the OS keyring, not config.yml) -->
+<section class="mt-8">
+    <h2 class="text-lg font-semibold text-white mb-3">API keys</h2>
+    <p class="text-sm text-[#9ca3af] mb-3">Keys are stored in your OS keyring (or read from a <span class="font-mono">.env</span> file / environment), never in <span class="font-mono">config.yml</span>.</p>
+    <div class="space-y-3">
+        {% for k in key_handles %}
+        <div class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-4 flex items-end gap-2">
+            <form method="post" action="/settings/key" class="flex-1 flex items-end gap-2">
+                <input type="hidden" name="handle" value="{{ k.handle }}">
+                <label class="flex-1">
+                    <span class="text-sm text-[#9ca3af]">{{ k.label }}
+                        <span class="font-mono text-xs text-[#6b7280]">({{ k.handle }})</span>
+                        {% if k.has_key %}<span class="text-[#7ee2a0]">· set</span>{% else %}<span class="text-[#f0a0a0]">· missing</span>{% endif %}
+                    </span>
+                    <input type="password" name="api_key" placeholder="Paste API key…"
+                           class="mt-1 block w-full bg-[#161922] border border-[#2a2e3a] text-white text-sm rounded-md px-3 py-2 focus:outline-none">
+                </label>
+                <button type="submit" class="text-sm px-4 py-2 bg-[#7c8cff] hover:bg-[#9aa7ff] text-white rounded-md font-medium transition">Save key</button>
+            </form>
+            {% if k.has_key %}
+            <form method="post" action="/settings/key/delete">
+                <input type="hidden" name="handle" value="{{ k.handle }}">
+                <button type="submit" class="text-sm px-3 py-2 bg-[#3a1c1c] hover:bg-[#5c2424] text-[#f0a0a0] rounded-md transition">Remove</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endfor %}
+        {% if not key_handles %}
+        <p class="text-sm text-[#6b7280]">No providers require an API key yet.</p>
+        {% endif %}
+    </div>
+</section>
+
+<script>
+// Show/hide + relabel the endpoint field in the "add provider" form per type.
+const TYPE_PRESETS = {
+    {% for t in type_presets %}
+    "{{ t.id }}": {
+        endpoint_field: {% if t.endpoint_field %}"{{ t.endpoint_field }}"{% else %}null{% endif %},
+        label: "{{ t.endpoint_label }}",
+        placeholder: "{{ t.endpoint_placeholder }}",
+        cli: {% if t.cli %}true{% else %}false{% endif %}
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+};
+(function() {
+    const typeSel = document.getElementById('add-type');
+    const wrap = document.getElementById('add-endpoint-wrap');
+    const label = document.getElementById('add-endpoint-label');
+    const input = document.getElementById('add-endpoint');
+    const keyWrap = document.getElementById('add-keyenv-wrap');
+    const keyInput = keyWrap ? keyWrap.querySelector('input') : null;
+    const modelInput = document.getElementById('add-model');
+    if (!typeSel) return;
+    function sync() {
+        const p = TYPE_PRESETS[typeSel.value] || {};
+        if (p.endpoint_field) {
+            wrap.style.display = '';
+            label.textContent = p.label || 'API base';
+            input.placeholder = p.placeholder || '';
+        } else {
+            wrap.style.display = 'none';
+            input.value = '';
+        }
+        // Agent-CLI providers need no API key; hide that field.
+        if (keyWrap) {
+            keyWrap.style.display = p.cli ? 'none' : '';
+            if (p.cli && keyInput) keyInput.value = '';
+        }
+        if (modelInput) {
+            modelInput.placeholder = p.cli
+                ? 'model name/alias — or blank for the CLI default'
+                : 'e.g. gpt-4o, claude-opus-4-8, meta-llama/Llama-3-8B';
+        }
+    }
+    typeSel.addEventListener('change', sync);
+    sync();
+})();
+
+async function testProvider(name, btn) {
+    const out = document.getElementById('test-result-' + name);
+    btn.disabled = true;
+    out.textContent = 'Testing…';
+    out.className = 'text-xs mt-2 text-[#9ca3af]';
+    try {
+        const res = await fetch('/settings/test/' + encodeURIComponent(name), { method: 'POST' });
+        const data = await res.json();
+        out.textContent = data.message;
+        out.className = 'text-xs mt-2 ' + (data.ok ? 'text-[#7ee2a0]' : 'text-[#f0a0a0]');
+    } catch (e) {
+        out.textContent = 'Test failed: ' + e;
+        out.className = 'text-xs mt-2 text-[#f0a0a0]';
+    } finally {
+        btn.disabled = false;
+    }
+}
+</script>
+
+{% endblock %}

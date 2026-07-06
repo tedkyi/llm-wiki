@@ -17,6 +17,7 @@ A hands-on guide for using LLM-Wiki day-to-day. Start here if you want to **do t
   - [Browsing the wiki visually](#browsing-the-wiki-visually)
   - [Keeping the wiki healthy](#keeping-the-wiki-healthy)
 - [Query Scope — Wiki vs Raw vs Hybrid](#query-scope--wiki-vs-raw-vs-hybrid)
+- [Configuring LLM providers](#configuring-llm-providers)
 - [Full CLI Command Reference](#full-cli-command-reference)
 - [Troubleshooting](#troubleshooting)
 - [First-Time Setup (If You're Starting Fresh)](#first-time-setup-if-youre-starting-fresh)
@@ -25,9 +26,9 @@ A hands-on guide for using LLM-Wiki day-to-day. Start here if you want to **do t
 
 ## Daily Startup
 
-Every time you want to use LLM-Wiki, you need two things running: **Ollama** (the local LLM server) and **the LLM-Wiki web server** (the UI).
+Every time you want to use LLM-Wiki you need **the LLM-Wiki web server** (the UI) running, plus whatever LLM provider your tasks are routed to. On the default setup that's a local **Ollama** server. (If you've routed everything to a cloud provider, you can skip step 1 — check your routing with `wiki providers list`. See [Configuring LLM providers](#configuring-llm-providers).)
 
-### 1. Make sure Ollama is running
+### 1. Make sure Ollama is running (default local setup)
 
 Ollama should auto-start when your Mac boots. To check:
 
@@ -288,6 +289,51 @@ Different questions work better against different layers.
 
 ---
 
+## Configuring LLM providers
+
+By default LLM-Wiki runs every pipeline stage on a local Ollama model (`qwen3.6:35b`) — no keys, no cloud. You can route any stage to a different backend: another local server (vLLM, LM Studio), a cloud vendor (OpenAI, Anthropic, Gemini, …), or the Claude Code / Codex CLIs. Routing is **per task**, so a common setup is "local for ingest, cloud for answering queries."
+
+This is the quick day-to-day version. For the full config-file schema, provider types, and worked examples, see **[PROVIDERS.md](./PROVIDERS.md)**.
+
+### See what's configured
+
+```bash
+wiki providers list      # profiles, per-task routing, and which API keys are set
+```
+
+### Add a cloud provider's API key
+
+Keys live in your OS keyring (or a gitignored `.env`), never in `config.yml`:
+
+```bash
+wiki providers set-key anthropic     # prompts, hidden input
+wiki providers set-key openai
+wiki providers rm-key anthropic      # remove one later
+```
+
+### Add or change a provider
+
+Two ways:
+
+- **Web UI** — `wiki serve` → **Settings** page. Pick a preset (Ollama, vLLM, LM Studio, OpenAI, Anthropic, Gemini, …), fill in the model, and it writes a valid profile and per-task routing for you.
+- **By hand** — edit `.wiki/config.yml` under `llm:` (schema and examples in [PROVIDERS.md](./PROVIDERS.md)).
+
+After any change, confirm the provider is reachable:
+
+```bash
+wiki providers test anthropic
+```
+
+### Use a provider for a single query
+
+Overrides routing just for that one call:
+
+```bash
+wiki query "compare RAG and fine-tuning" --provider anthropic
+```
+
+---
+
 ## Full CLI Command Reference
 
 All commands assume you've activated the venv (`source .venv/bin/activate`). Run `wiki --help` at any time for the current list.
@@ -355,7 +401,20 @@ wiki query "..." -n 10                  # Return top 10 hits instead of 8
 wiki query "..." --min-score 0.3        # Drop low-confidence hits
 wiki query "..." --no-rerank            # Skip LLM reranking (faster)
 wiki query "..." --no-intent-classify   # Skip intent classification (~3 sec faster)
+wiki query "..." --provider anthropic   # Use a specific LLM provider for this query
 wiki query "..." --save-as my-answer    # Save as wiki/synthesis/my-answer.md
+```
+
+### Managing LLM providers
+
+See [Configuring LLM providers](#configuring-llm-providers) above and [PROVIDERS.md](./PROVIDERS.md) for details.
+
+```bash
+wiki providers list                     # Profiles, per-task routing, API-key status
+wiki providers set-key anthropic        # Store a cloud API key in the OS keyring (hidden prompt)
+wiki providers set-key openai
+wiki providers rm-key anthropic         # Remove a stored key
+wiki providers test anthropic           # Check a provider profile is reachable / authenticated
 ```
 
 ### Keeping things healthy
@@ -503,6 +562,7 @@ Open `http://127.0.0.1:8000` and start adding documents.
 ## Getting Help
 
 - **Project README** (architecture, internals, design decisions) — [README.md](./README.md)
+- **Providers guide** (configuring local/cloud LLM backends) — [PROVIDERS.md](./PROVIDERS.md)
 - **GitHub Issues** — https://github.com/NiharShrotri/llm-wiki/issues
 - **Karpathy's original LLM-Wiki gist** (the pattern this implements) — https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 
@@ -513,4 +573,4 @@ When reporting bugs, please include:
 
 ---
 
-*Last updated: LLM-Wiki v0.7.0*
+*Last updated: LLM-Wiki v1.1.1*

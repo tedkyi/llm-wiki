@@ -558,10 +558,8 @@ def check_noise_in_synthesis_sources(inv: PageInventory) -> list[LintIssue]:
 def check_contradictions_deep(
     inv: PageInventory,
     paths: cfg.WikiPaths,
-    client,  # OllamaClient
+    router,  # LLMRouter
     max_pairs: int = 10,
-    *,
-    llm_cfg: dict | None = None,
 ) -> list[LintIssue]:
     """Use Qwen3 to scan pairs of pages that share entities/concepts and
     flag potentially contradictory claims.
@@ -569,11 +567,12 @@ def check_contradictions_deep(
     This is slow — one LLM call per pair of pages. We limit to `max_pairs`
     to keep the runtime bounded.
     """
-    from .llm import ChatMessage, LLMError, resolve_llm_options
+    from .llm import ChatMessage, LLMError
     from .prompts import CONTRADICTION_DETECTION_PROMPT
 
     issues: list[LintIssue] = []
-    contradiction_options = resolve_llm_options(llm_cfg or {}, task="contradiction")
+    contradiction_client = router.client_for("contradiction")
+    contradiction_options = router.options_for("contradiction")
 
     # 1. Identify pairs of pages that share outgoing wikilinks
     page_link_sets: dict[str, set[str]] = {}
@@ -614,7 +613,7 @@ def check_contradictions_deep(
         ]
 
         try:
-            response = client.chat(messages, thinking=False, **contradiction_options)
+            response = contradiction_client.chat(messages, thinking=False, **contradiction_options)
         except LLMError:
             continue
 
@@ -775,8 +774,7 @@ def run_lint(
     paths: cfg.WikiPaths,
     *,
     deep: bool = False,
-    client=None,  # OllamaClient, required if deep=True
-    llm_cfg: dict | None = None,
+    router=None,  # LLMRouter, required if deep=True
 ) -> LintReport:
     """Run all fast checks, plus deep checks if requested.
 
@@ -805,9 +803,9 @@ def run_lint(
         report.fast_checks_run.append(name)
 
     # Deep check (LLM-powered)
-    if deep and client is not None:
+    if deep and router is not None:
         report.deep_check_run = True
-        report.issues.extend(check_contradictions_deep(inv, paths, client, llm_cfg=llm_cfg))
+        report.issues.extend(check_contradictions_deep(inv, paths, router))
 
     # Sort: errors first, then warnings, then infos. Within each, by page.
     severity_order = {

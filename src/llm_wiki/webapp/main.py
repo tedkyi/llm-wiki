@@ -60,7 +60,7 @@ def create_app(paths: cfg.WikiPaths) -> FastAPI:
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     # Routes — import lazily to avoid circular dependencies
-    from .routes import dashboard, graph, ingest, lint, query, sources
+    from .routes import dashboard, graph, ingest, lint, query, settings, sources
 
     app.include_router(dashboard.router)
     app.include_router(sources.router)
@@ -68,5 +68,6 @@ def create_app(paths: cfg.WikiPaths) -> FastAPI:
     app.include_router(lint.router)
     app.include_router(query.router)
     app.include_router(ingest.router)
+    app.include_router(settings.router)
 
     return app

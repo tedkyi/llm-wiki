@@ -27,6 +27,7 @@ from rich.table import Table
 
 from . import __version__
 from . import config as cfg
+from . import credentials
 from . import db
 from . import ingest_llm
 from . import ingest_raw
@@ -36,9 +37,10 @@ from . import scaffold
 from . import search
 from .llm import (
     LLMError,
+    LLMRouter,
     ModelNotFound,
-    OllamaClient,
     OllamaNotRunning,
+    make_client,
 )
 
 app = typer.Typer(
@@ -57,6 +59,15 @@ sources_app = typer.Typer(
     rich_markup_mode="rich",
 )
 app.add_typer(sources_app, name="sources")
+
+providers_app = typer.Typer(
+    name="providers",
+    help="Manage LLM inference providers and their API keys.",
+    no_args_is_help=True,
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(providers_app, name="providers")
 
 console = Console()
 
@@ -91,6 +102,67 @@ def _resolve_root_or_die() -> cfg.WikiPaths:
         _hint("Run [bold]wiki init[/bold] in an empty folder to create one.")
         raise typer.Exit(code=1)
     return cfg.WikiPaths(root=root)
+
+
+def _report_routing(router: LLMRouter, tasks: tuple[str, ...]) -> None:
+    """Print which provider/model handles each of a command's tasks.
+
+    Resolves each task through the router's own routing (so a --provider
+    override or per-task mapping is reflected). Collapses to one line when every
+    task resolves to the same provider.
+    """
+    rows = [(t, router.provider_for(t), router.model_for(t)) for t in tasks]
+    distinct = {(p, m) for _, p, m in rows}
+    if len(distinct) == 1:
+        provider, model = next(iter(distinct))
+        _ok(f"Provider ready · [bold]{provider}[/bold] · {model}")
+        return
+    _ok("Providers ready:")
+    for task, provider, model in rows:
+        console.print(f"    [dim]{task:16}[/dim] [bold]{provider}[/bold] · {model}")
+
+
+def _build_router(
+    paths: cfg.WikiPaths,
+    *,
+    provider: str | None = None,
+    tasks: tuple[str, ...] = (),
+    fail_hint: str | None = None,
+) -> LLMRouter:
+    """Build an LLMRouter from config and verify its providers are reachable.
+
+    `provider` (the `--provider` flag) forces every task onto one profile.
+    `tasks` are the pipeline tasks this command will run — reported (with their
+    resolved provider/model) once the check passes. Loads vendor API keys into
+    the environment first. Exits with a helpful message on any error.
+    """
+    credentials.prime_environment()
+    config = cfg.load_config(paths)
+    llm_cfg = config.get("llm", {})
+    try:
+        router = LLMRouter(llm_cfg, override=provider)
+    except LLMError as e:
+        _err(str(e))
+        raise typer.Exit(code=1)
+
+    console.print()
+    console.print("[dim]Checking inference providers…[/dim]")
+    try:
+        router.ensure_ready()
+    except (OllamaNotRunning, ModelNotFound) as e:
+        _err(str(e))
+        if fail_hint:
+            _hint(fail_hint)
+        raise typer.Exit(code=1)
+    except LLMError as e:
+        _err(f"LLM check failed: {e}")
+        if fail_hint:
+            _hint(fail_hint)
+        raise typer.Exit(code=1)
+
+    if tasks:
+        _report_routing(router, tasks)
+    return router
 
 
 def _format_bytes(n: int) -> str:
@@ -236,17 +308,34 @@ def status() -> None:
     llm = config.get("llm", {})
     search_cfg = config.get("search", {})
     ingest_cfg = config.get("ingest", {})
-    cfg_table.add_row(
-        "LLM defaults",
-        "[dim]below — per-task overrides in llm.tasks (config.yml) not shown[/dim]",
+    providers = llm.get("providers", {})
+    default_provider = llm.get("default_provider")
+
+    # Each configured provider profile: model + (host/api_base) + vendor key.
+    cfg_table.add_row("Providers", "")
+    for name, profile in providers.items():
+        model = profile.get("model", "?")
+        endpoint = profile.get("host") or profile.get("api_base") or ""
+        if credentials.profile_needs_key(profile):
+            has = credentials.profile_has_key(profile)
+            src = f"${profile['api_key_env']}" if profile.get("api_key_env") else "key"
+            key_note = f"[green]{src} set[/green]" if has else f"[red]{src} missing[/red]"
+        else:
+            key_note = "[dim]local[/dim]"
+        endpoint_note = f" · {endpoint}" if endpoint else ""
+        cfg_table.add_row(f"  {name}", f"{model}{endpoint_note} · {key_note}")
+
+    # Task → provider routing, grouped by provider (resolve each task the way
+    # the router would: its mapping, falling back to default_provider).
+    task_providers = llm.get("task_providers", {})
+    groups: dict[str, list[str]] = {}
+    for task in cfg.LLM_TASKS:
+        prov = task_providers.get(task) or default_provider or "?"
+        groups.setdefault(prov, []).append(task)
+    routing_lines = "\n".join(
+        f"[bold]{prov}[/bold]: {', '.join(tasks)}" for prov, tasks in groups.items()
     )
-    cfg_table.add_row("  provider", llm.get("provider", "?"))
-    cfg_table.add_row("  model", llm.get("model", "?"))
-    cfg_table.add_row("  host", llm.get("host", "?"))
-    cfg_table.add_row("  temperature", str(llm.get("temperature", "?")))
-    cfg_table.add_row("  top_k / top_p", f"{llm.get('top_k', '?')} / {llm.get('top_p', '?')}")
-    cfg_table.add_row("  num_ctx", str(llm.get("num_ctx", "?")))
-    cfg_table.add_row("  num_predict", str(llm.get("num_predict", "?")))
+    cfg_table.add_row("Task routing", routing_lines)
     cfg_table.add_row("Max source chars", str(ingest_cfg.get("max_source_chars", "?")))
     cfg_table.add_row("Search backend", search_cfg.get("backend", "?"))
     cfg_table.add_row("Reranking", "on" if search_cfg.get("rerank") else "off")
@@ -581,6 +670,126 @@ def sources_rm_cmd(
         raise typer.Exit(code=1)
 
 
+@providers_app.command("list")
+def providers_list() -> None:
+    """List configured provider profiles, task routing, and API-key status."""
+    paths = _resolve_root_or_die()
+    credentials.prime_environment()
+    config = cfg.load_config(paths)
+    llm = config.get("llm", {})
+    providers = llm.get("providers", {})
+    default_provider = llm.get("default_provider", "?")
+    task_providers = llm.get("task_providers", {})
+
+    if not providers:
+        _err("No providers configured in .wiki/config.yml.")
+        raise typer.Exit(code=1)
+
+    table = Table(title="Inference providers", box=None, padding=(0, 2))
+    table.add_column("Provider", style="bold")
+    table.add_column("Type", style="dim")
+    table.add_column("Model")
+    table.add_column("Endpoint", style="dim")
+    table.add_column("API key")
+    for name, profile in providers.items():
+        model = profile.get("model", "?")
+        endpoint = profile.get("host") or profile.get("api_base") or "-"
+        if credentials.profile_needs_key(profile):
+            has = credentials.profile_has_key(profile)
+            src = f"${profile['api_key_env']}" if profile.get("api_key_env") else "set"
+            if profile.get("api_key_env"):
+                key_note = f"[green]{src}[/green]" if has else f"[red]{src} (unset)[/red]"
+            else:
+                key_note = "[green]set[/green]" if has else "[red]missing[/red]"
+        else:
+            key_note = "[dim]not needed[/dim]"
+        table.add_row(name, profile.get("type", "?"), model, endpoint, key_note)
+    console.print()
+    console.print(table)
+
+    # Task routing — resolve each task the way the router would.
+    console.print()
+    routing = Table(title="Task -> provider routing", box=None, padding=(0, 2))
+    routing.add_column("Task", style="dim")
+    routing.add_column("Provider")
+    for task in cfg.LLM_TASKS:
+        routing.add_row(task, task_providers.get(task) or default_provider or "?")
+    console.print(routing)
+
+
+def _key_handle(name: str) -> str:
+    """Map a CLI key name to its keyring handle.
+
+    A known vendor slug (anthropic, openai, …) maps to its canonical env-var
+    name; anything else is treated as a literal env-var handle (e.g. a
+    profile's `api_key_env` like OPENROUTER_API_KEY).
+    """
+    name = name.strip()
+    if name in credentials.VENDOR_ENV_VARS:
+        return credentials.env_var_for(name)
+    return name
+
+
+@providers_app.command("set-key")
+def providers_set_key(
+    name: str = typer.Argument(
+        ..., help="Vendor slug (anthropic, openai) or an env-var name (e.g. OPENROUTER_API_KEY)."
+    ),
+) -> None:
+    """Store an API key in the OS keyring (prompted, hidden input)."""
+    handle = _key_handle(name)
+    key = typer.prompt(f"API key for '{handle}'", hide_input=True)
+    if not key.strip():
+        _err("No key entered.")
+        raise typer.Exit(code=1)
+    try:
+        credentials.set_named_key(handle, key.strip())
+    except RuntimeError as e:
+        _err(str(e))
+        raise typer.Exit(code=1)
+    _ok(f"Stored API key '{handle}' in the OS keyring.")
+
+
+@providers_app.command("rm-key")
+def providers_rm_key(
+    name: str = typer.Argument(
+        ..., help="Vendor slug or env-var name whose stored key to remove."
+    ),
+) -> None:
+    """Remove a stored API key from the keyring."""
+    handle = _key_handle(name)
+    credentials.delete_named_key(handle)
+    _ok(f"Removed any stored API key '{handle}'.")
+
+
+@providers_app.command("test")
+def providers_test(
+    provider: str = typer.Argument(..., help="Provider profile name to test (from `wiki providers list`)."),
+) -> None:
+    """Check that a provider profile is reachable / authenticated."""
+    paths = _resolve_root_or_die()
+    credentials.prime_environment()
+    config = cfg.load_config(paths)
+    providers = config.get("llm", {}).get("providers", {})
+    if provider not in providers:
+        _err(f"Unknown provider '{provider}'. Configured: {', '.join(providers) or '(none)'}.")
+        raise typer.Exit(code=1)
+    client = make_client(providers[provider])
+    console.print()
+    console.print(f"[dim]Testing '{provider}' ({client.model or 'default'})…[/dim]")
+    try:
+        message = client.probe()
+    except (OllamaNotRunning, ModelNotFound) as e:
+        _err(str(e))
+        raise typer.Exit(code=1)
+    except LLMError as e:
+        _err(f"Provider check failed: {e}")
+        raise typer.Exit(code=1)
+    finally:
+        client.close()
+    _ok(f"Provider '{provider}': {message}")
+
+
 @app.command()
 def reingest(
     source_id: int = typer.Argument(..., help="The source ID to reset (from `wiki sources list`)."),
@@ -683,7 +892,9 @@ class CliIngestCallbacks(ingest_llm.IngestCallbacks):
 
     def on_stream_chunk(self, chunk: str) -> None:
         if self._stream_active:
-            console.print(chunk, end="", style="dim", highlight=False)
+            # markup=False: raw LLM text (e.g. [[wikilinks]]) is not rich markup —
+            # otherwise rich parses [..] as style tags and drops the contents.
+            console.print(chunk, end="", style="dim", highlight=False, markup=False)
             self._stream_char_count += len(chunk)
 
     def on_page_written(self, page: ingest_llm.PageChange) -> None:
@@ -732,6 +943,11 @@ def ingest(
         "--no-thinking",
         help="Disable Qwen3 thinking mode in Pass 1 (faster, slightly lower quality).",
     ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Force a specific provider profile for this run (overrides per-task routing).",
+    ),
     verbose_log: bool = typer.Option(
         True,
         "--verbose-log/--no-verbose-log",
@@ -749,30 +965,14 @@ def ingest(
     """
     paths = _resolve_root_or_die()
     config = cfg.load_config(paths)
-    llm_cfg = config.get("llm", {})
     ingest_cfg = config.get("ingest", {})
     max_source_chars = ingest_cfg.get("max_source_chars", ingest_llm.MAX_SOURCE_CHARS)
 
-    host = llm_cfg.get("host", "http://localhost:11434")
-    model = llm_cfg.get("model", "qwen3.6:35b")
-
-    # Verify Ollama is reachable before doing anything
-    console.print()
-    console.print(f"[dim]Checking Ollama at {host} …[/dim]")
-    client = OllamaClient(host=host, model=model)
-    try:
-        client.ensure_ready()
-    except OllamaNotRunning as e:
-        _err(str(e))
-        raise typer.Exit(code=1)
-    except ModelNotFound as e:
-        _err(str(e))
-        raise typer.Exit(code=1)
-    except LLMError as e:
-        _err(f"LLM check failed: {e}")
-        raise typer.Exit(code=1)
-
-    _ok(f"Ollama ready · model=[bold]{model}[/bold]")
+    router = _build_router(
+        paths,
+        provider=provider,
+        tasks=("extraction", "extraction_retry", "draft"),
+    )
 
     mode = "batch" if batch else "interactive"
     thinking = not no_thinking
@@ -784,9 +984,8 @@ def ingest(
             result = ingest_llm.ingest_source(
                 paths,
                 source_id,
-                client,
+                router,
                 cb,
-                llm_cfg=llm_cfg,
                 max_source_chars=max_source_chars,
                 mode=mode,
                 thinking_for_extraction=thinking,
@@ -797,9 +996,8 @@ def ingest(
             # All pending (with auto-discovery)
             results = ingest_llm.ingest_pending(
                 paths,
-                client,
+                router,
                 lambda: CliIngestCallbacks(mode=mode),
-                llm_cfg=llm_cfg,
                 max_source_chars=max_source_chars,
                 mode=mode,
                 auto_discover=not no_discover,
@@ -807,7 +1005,7 @@ def ingest(
                 verbose_log=verbose_log,
             )
     finally:
-        client.close()
+        router.close()
 
     if not results:
         console.print()
@@ -893,7 +1091,7 @@ class CliQueryCallbacks(query_module.QueryCallbacks):
     def on_chitchat_reply(self, reply: str) -> None:
         console.print()
         console.print("[dim]" + "─" * 72 + "[/dim]")
-        console.print(reply)
+        console.print(reply, markup=False)  # raw LLM text, not rich markup
         console.print("[dim]" + "─" * 72 + "[/dim]")
         console.print()
 
@@ -927,7 +1125,8 @@ class CliQueryCallbacks(query_module.QueryCallbacks):
 
     def on_stream_chunk(self, chunk: str) -> None:
         if self._stream_active:
-            console.print(chunk, end="", highlight=False)
+            # markup=False so [[wikilinks]] aren't parsed as rich style tags.
+            console.print(chunk, end="", highlight=False, markup=False)
 
     def on_saved(self, saved_path: str) -> None:
         if self._stream_active:
@@ -1001,6 +1200,11 @@ def query(
         "--no-intent-classify",
         help="Skip intent classification step (saves ~3 sec per query).",
     ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Force a specific provider profile for this query (overrides per-task routing).",
+    ),
 ) -> None:
     """Ask a question: search the wiki, synthesize an answer with citations.
 
@@ -1011,8 +1215,6 @@ def query(
       4. Optionally save the answer as a synthesis page
     """
     paths = _resolve_root_or_die()
-    config = cfg.load_config(paths)
-    llm_cfg = config.get("llm", {})
 
     # Resolve search mode shortcuts
     if lex:
@@ -1056,27 +1258,18 @@ def query(
         _hint("Run [bold]wiki ingest[/bold] first to create pages.")
         raise typer.Exit(code=1)
 
-    # Connect to Ollama
-    host = llm_cfg.get("host", "http://localhost:11434")
-    model = llm_cfg.get("model", "qwen3.6:35b")
-    client = OllamaClient(host=host, model=model)
-    try:
-        client.ensure_ready()
-    except OllamaNotRunning as e:
-        _err(str(e))
-        raise typer.Exit(code=1)
-    except ModelNotFound as e:
-        _err(str(e))
-        raise typer.Exit(code=1)
-    except LLMError as e:
-        _err(f"LLM check failed: {e}")
-        raise typer.Exit(code=1)
+    # Build the provider router and verify reachability
+    router = _build_router(
+        paths,
+        provider=provider,
+        tasks=("intent_classify", "chitchat", "synthesis"),
+    )
 
     callbacks = CliQueryCallbacks()
     try:
         result = query_module.run_query(
             paths,
-            client,
+            router,
             question,
             callbacks,
             mode=mode,
@@ -1084,13 +1277,12 @@ def query(
             min_score=min_score,
             rerank=not no_rerank,
             save_as=save_as,
-            llm_cfg=llm_cfg,
             scope=scope,
             page_types=page_types,
             classify_intent_first=not no_intent_classify,
         )
     finally:
-        client.close()
+        router.close()
 
     if result.error and not result.answer:
         raise typer.Exit(code=1)
@@ -1271,6 +1463,11 @@ def lint(
         "--max-pairs",
         help="Max page pairs to check in --deep mode.",
     ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Force a specific provider profile for --deep checks.",
+    ),
 ) -> None:
     """Lint the wiki for broken links, orphans, missing pages, and more.
 
@@ -1279,22 +1476,15 @@ def lint(
     """
     paths = _resolve_root_or_die()
 
-    # If --deep, verify Ollama up front
-    client: Optional[OllamaClient] = None
-    llm_cfg: dict = {}
+    # If --deep, build the provider router and verify reachability up front
+    router: Optional[LLMRouter] = None
     if deep:
-        config = cfg.load_config(paths)
-        llm_cfg = config.get("llm", {})
-        host = llm_cfg.get("host", "http://localhost:11434")
-        model = llm_cfg.get("model", "qwen3.6:35b")
-        client = OllamaClient(host=host, model=model)
-        try:
-            client.ensure_ready()
-        except (OllamaNotRunning, ModelNotFound, LLMError) as e:
-            _err(str(e))
-            _hint("Fast-only lint still works without Ollama — omit --deep.")
-            raise typer.Exit(code=1)
-        _ok(f"Ollama ready · model=[bold]{model}[/bold]")
+        router = _build_router(
+            paths,
+            provider=provider,
+            tasks=("contradiction",),
+            fail_hint="Fast-only lint still works without an LLM — omit --deep.",
+        )
 
     try:
         console.print()
@@ -1303,10 +1493,10 @@ def lint(
         else:
             console.print("[dim]Running fast checks…[/dim]")
 
-        report = lint_module.run_lint(paths, deep=deep, client=client, llm_cfg=llm_cfg)
+        report = lint_module.run_lint(paths, deep=deep, router=router)
     finally:
-        if client is not None:
-            client.close()
+        if router is not None:
+            router.close()
 
     # Auto-fix before displaying
     if fix:
@@ -1314,7 +1504,7 @@ def lint(
         report.auto_fixed = fixed_count
         if fixed_count > 0:
             # Rebuild inventory + re-run checks so the report reflects post-fix state
-            report = lint_module.run_lint(paths, deep=False, client=None)
+            report = lint_module.run_lint(paths, deep=False, router=None)
             report.auto_fixed = fixed_count
 
     _render_lint_report_terminal(report)
