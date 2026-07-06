@@ -100,14 +100,17 @@ class WikiPaths:
 # The pipeline tasks that request an LLM completion. Each is routed to a
 # provider via `llm.task_providers` and resolves its sampling settings from
 # that provider's profile.
+# Ordered by owning command (ingest → query → lint) and pipeline stage, so the
+# settings UI and generated config.yml group tasks the way the user thinks about
+# them. Names follow a `command_stage` convention for the same reason.
 LLM_TASKS = (
-    "extraction",
-    "extraction_retry",
-    "draft",
-    "synthesis",
-    "intent_classify",
-    "chitchat",
-    "contradiction",
+    "ingest_extract",
+    "ingest_extract_retry",
+    "ingest_draft",
+    "query_intent",
+    "query_chitchat",
+    "query_synthesis",
+    "lint_deep",
 )
 
 # Keys on a provider profile that are structural, not sampling options. Anything
@@ -274,11 +277,11 @@ DEFAULT_CONFIG: dict = {
                 "num_predict": 8192,
                 # Sparse per-task overrides, merged over the base settings above.
                 "tasks": {
-                    "extraction": {"num_predict": -1},
-                    "extraction_retry": {"temperature": 0.6, "num_predict": -1},
-                    "intent_classify": {"temperature": 0.6},
-                    "chitchat": {"temperature": 1.0},
-                    "contradiction": {"temperature": 0.6},
+                    "ingest_extract": {"num_predict": -1},
+                    "ingest_extract_retry": {"temperature": 0.6, "num_predict": -1},
+                    "query_intent": {"temperature": 0.6},
+                    "query_chitchat": {"temperature": 1.0},
+                    "lint_deep": {"temperature": 0.6},
                 },
             },
             "ollama-litellm": {
@@ -295,11 +298,11 @@ DEFAULT_CONFIG: dict = {
                 "num_ctx": 131072,
                 "num_predict": 8192,
                 "tasks": {
-                    "extraction": {"num_predict": -1},
-                    "extraction_retry": {"temperature": 0.6, "num_predict": -1},
-                    "intent_classify": {"temperature": 0.6},
-                    "chitchat": {"temperature": 1.0},
-                    "contradiction": {"temperature": 0.6},
+                    "ingest_extract": {"num_predict": -1},
+                    "ingest_extract_retry": {"temperature": 0.6, "num_predict": -1},
+                    "query_intent": {"temperature": 0.6},
+                    "query_chitchat": {"temperature": 1.0},
+                    "lint_deep": {"temperature": 0.6},
                 },
             },
             # Example cloud profiles — not wired/tested yet, but selectable.

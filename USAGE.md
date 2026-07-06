@@ -157,8 +157,8 @@ wiki query "when is the capstone final report due" --scope raw
 # Save the answer as a new wiki page
 wiki query "compare RAG and fine-tuning" --scope hybrid --save-as rag-vs-fine-tuning
 
-# Skip intent classification to save ~3 seconds
-wiki query "summarize my sources" --no-intent-classify
+# Opt into intent classification (off by default) so chitchat skips retrieval
+wiki query "summarize my sources" --intent-classify
 ```
 
 ---
@@ -400,7 +400,7 @@ wiki query "..." --mode hybrid          # Both + LLM rerank (default, best quali
 wiki query "..." -n 10                  # Return top 10 hits instead of 8
 wiki query "..." --min-score 0.3        # Drop low-confidence hits
 wiki query "..." --no-rerank            # Skip LLM reranking (faster)
-wiki query "..." --no-intent-classify   # Skip intent classification (~3 sec faster)
+wiki query "..." --intent-classify      # Classify intent first (off by default; slow)
 wiki query "..." --provider anthropic   # Use a specific LLM provider for this query
 wiki query "..." --save-as my-answer    # Save as wiki/synthesis/my-answer.md
 ```

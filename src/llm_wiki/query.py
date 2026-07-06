@@ -229,7 +229,7 @@ def run_query(
     save_as: str | None = None,
     scope: str = "wiki",  # 'wiki' | 'raw' | 'hybrid'
     page_types: list[str] | None = None,
-    classify_intent_first: bool = True,
+    classify_intent_first: bool = False,
 ) -> QueryResult:
     """Run a full query → answer pipeline.
 
@@ -244,7 +244,8 @@ def run_query(
 
     classify_intent_first runs intent classification before retrieval. If
     the user asked something like 'hi' or 'thanks', we skip retrieval and
-    respond conversationally.
+    respond conversationally. Off by default — the extra LLM round-trip is
+    slow and rarely worth it; callers opt in explicitly.
     """
     callbacks.on_start(question, mode)
 
@@ -336,8 +337,8 @@ def run_query(
 
     answer_parts: list[str] = []
     try:
-        synthesis_client = router.client_for("synthesis")
-        synthesis_options = router.options_for("synthesis")
+        synthesis_client = router.client_for("query_synthesis")
+        synthesis_options = router.options_for("query_synthesis")
         gen = synthesis_client.chat_stream(messages, thinking=False, **synthesis_options)
         try:
             while True:

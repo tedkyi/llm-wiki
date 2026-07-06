@@ -995,7 +995,7 @@ def ingest(
     router = _build_router(
         paths,
         provider=provider,
-        tasks=("extraction", "extraction_retry", "draft"),
+        tasks=("ingest_extract", "ingest_extract_retry", "ingest_draft"),
     )
 
     mode = "batch" if batch else "interactive"
@@ -1219,10 +1219,11 @@ def query(
             "sources, synthesis. Default: all types."
         ),
     ),
-    no_intent_classify: bool = typer.Option(
+    intent_classify: bool = typer.Option(
         False,
-        "--no-intent-classify",
-        help="Skip intent classification step (saves ~3 sec per query).",
+        "--intent-classify/--no-intent-classify",
+        help="Classify intent before searching so pure chitchat ('hi', 'thanks') "
+        "skips retrieval. Off by default — it's slow and rarely worth the wait.",
     ),
     provider: Optional[str] = typer.Option(
         None,
@@ -1286,7 +1287,7 @@ def query(
     router = _build_router(
         paths,
         provider=provider,
-        tasks=("intent_classify", "chitchat", "synthesis"),
+        tasks=("query_intent", "query_chitchat", "query_synthesis"),
     )
 
     callbacks = CliQueryCallbacks()
@@ -1303,7 +1304,7 @@ def query(
             save_as=save_as,
             scope=scope,
             page_types=page_types,
-            classify_intent_first=not no_intent_classify,
+            classify_intent_first=intent_classify,
         )
     finally:
         router.close()
@@ -1506,7 +1507,7 @@ def lint(
         router = _build_router(
             paths,
             provider=provider,
-            tasks=("contradiction",),
+            tasks=("lint_deep",),
             fail_hint="Fast-only lint still works without an LLM — omit --deep.",
         )
 
