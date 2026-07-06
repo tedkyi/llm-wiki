@@ -456,8 +456,8 @@ def _stream_with_retry(
 
     Returns (full_content, elapsed_seconds_of_final_successful_call).
     """
-    draft_client = router.client_for("draft")
-    draft_options = router.options_for("draft")
+    draft_client = router.client_for("ingest_draft")
+    draft_options = router.options_for("ingest_draft")
     for attempt in range(2):
         if attempt == 1:
             logger.info(f"LLM call failed for {label}; sleeping 5s before retry…")
@@ -565,8 +565,8 @@ def ingest_source(
     callbacks.on_extracting()
     extraction_messages = prompts.build_extraction_messages(parsed.title, source_text)
     logger.section("PASS 1 — EXTRACTION")
-    extraction_client = router.client_for("extraction")
-    extraction_options = router.options_for("extraction")
+    extraction_client = router.client_for("ingest_extract")
+    extraction_options = router.options_for("ingest_extract")
     logger.info(f"LLM call start: thinking={thinking_for_extraction}, json_mode=True, options={extraction_options}")
     _t0 = datetime.now(timezone.utc)
     try:
@@ -635,8 +635,8 @@ def ingest_source(
         logger.section("PASS 1 — EXTRACTION RETRY")
         logger.info("Sleeping 5s before retry…")
         time.sleep(5)
-        retry_client = router.client_for("extraction_retry")
-        retry_options = router.options_for("extraction_retry")
+        retry_client = router.client_for("ingest_extract_retry")
+        retry_options = router.options_for("ingest_extract_retry")
         logger.info(f"LLM call start: thinking=False, json_mode=True, options={retry_options}")
         _t0 = datetime.now(timezone.utc)
         try:

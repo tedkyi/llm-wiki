@@ -156,7 +156,7 @@ async def query_stream(
                     rerank=True,
                     save_as=None,
                     scope=scope,
-                    classify_intent_first=True,
+                    classify_intent_first=False,
                 )
                 result_holder["result"] = result
             except Exception as e:

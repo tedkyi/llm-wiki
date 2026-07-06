@@ -16,7 +16,17 @@
 <div class="mb-4 px-4 py-2 rounded-md bg-[#3a1c1c] border border-[#5c2424] text-[#f0a0a0] text-sm">{{ error }}</div>
 {% endif %}
 
-<form method="post" action="/settings" class="space-y-8">
+<form method="post" action="/settings" id="settings-form" class="space-y-8">
+
+    <!-- Sticky action bar: always-reachable Save + unsaved-changes indicator -->
+    <div class="sticky top-0 z-10 -mx-8 px-8 py-3 bg-[#0f1117]/95 backdrop-blur border-b border-[#2a2e3a] flex items-center justify-between">
+        <span id="dirty-flag" class="hidden text-xs text-[#f0a0a0]">● Unsaved changes</span>
+        <span id="dirty-placeholder" class="text-xs text-[#6b7280]">Provider &amp; routing settings</span>
+        <button type="submit"
+                class="px-5 py-2 bg-[#7c8cff] hover:bg-[#9aa7ff] text-white rounded-md font-medium transition">
+            Save settings
+        </button>
+    </div>
 
     <!-- Default provider + task routing -->
     <section class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5">
@@ -40,11 +50,22 @@
 
     <!-- Provider profiles -->
     <section class="space-y-4">
-        <h2 class="text-lg font-semibold text-white">Provider profiles</h2>
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-white">Provider profiles</h2>
+            <button type="button" id="collapse-all-btn" onclick="collapseAllProviders()"
+                    class="text-xs px-3 py-1.5 bg-[#232735] hover:bg-[#2c3142] text-[#c7ccd6] rounded-md transition">Collapse all</button>
+        </div>
         {% for p in providers %}
         <div class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5">
             <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center gap-3">
+                    <button type="button" onclick="toggleProvider('{{ p.name }}', this)"
+                            aria-label="Collapse or expand {{ p.name }}"
+                            class="provider-chevron shrink-0 -my-1.5 -ml-1.5 p-1.5 rounded text-[#9ca3af] hover:text-white hover:bg-[#232735] transition-transform">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+                            <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
                     <span class="text-base font-semibold text-white">{{ p.name }}</span>
                     <span class="text-xs px-2 py-0.5 rounded bg-[#161922] text-[#9ca3af] border border-[#2a2e3a]">{{ p.type }}</span>
                 </div>
@@ -60,6 +81,7 @@
                 </div>
             </div>
 
+            <div id="pbody-{{ p.name }}" class="provider-body hidden">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                 <label class="block">
                     <span class="text-sm text-[#9ca3af]">Model{% if p.is_cli %} <span class="text-xs text-[#6b7280]">(model name/alias, or blank for the {{ p.cli_name }} default)</span>{% endif %}</span>
@@ -121,6 +143,7 @@
             {% endif %}
 
             <div id="test-result-{{ p.name }}" class="text-xs mt-2"></div>
+            </div><!-- /provider-body -->
         </div>
         {% endfor %}
     </section>
@@ -270,6 +293,88 @@ async function testProvider(name, btn) {
         btn.disabled = false;
     }
 }
+
+// ── Collapsible provider boxes ────────────────────────────────────────────
+// Collapsing only toggles visibility (the `hidden` class); the form inputs stay
+// in the DOM and are still submitted. State is remembered in localStorage so it
+// survives the full page reload that a save triggers.
+const COLLAPSE_KEY = 'wiki:settings:collapsed:';
+const HAS_ERROR = {% if error %}true{% else %}false{% endif %};
+
+function applyCollapsed(name, collapsed) {
+    const body = document.getElementById('pbody-' + name);
+    if (!body) return;
+    body.classList.toggle('hidden', collapsed);
+    // Chevron points down (rotate-90) when expanded, right when collapsed.
+    const chevron = body.parentElement.querySelector('.provider-chevron');
+    if (chevron) chevron.classList.toggle('rotate-90', !collapsed);
+}
+
+function setCollapsed(name, collapsed) {
+    applyCollapsed(name, collapsed);
+    try { localStorage.setItem(COLLAPSE_KEY + name, collapsed ? '1' : '0'); } catch (e) {}
+}
+
+function toggleProvider(name) {
+    const body = document.getElementById('pbody-' + name);
+    if (!body) return;
+    setCollapsed(name, !body.classList.contains('hidden'));
+    syncCollapseAllLabel();
+}
+
+function collapseAllProviders() {
+    // Toggle: if any box is currently expanded, collapse all; otherwise expand all.
+    const bodies = Array.from(document.querySelectorAll('.provider-body'));
+    const anyOpen = bodies.some(b => !b.classList.contains('hidden'));
+    bodies.forEach(b => setCollapsed(b.id.replace('pbody-', ''), anyOpen));
+    syncCollapseAllLabel();
+}
+
+function syncCollapseAllLabel() {
+    const btn = document.getElementById('collapse-all-btn');
+    if (!btn) return;
+    const bodies = Array.from(document.querySelectorAll('.provider-body'));
+    const anyOpen = bodies.some(b => !b.classList.contains('hidden'));
+    btn.textContent = anyOpen ? 'Collapse all' : 'Expand all';
+}
+
+// ── Unsaved-changes indicator + navigation guard (main form only) ─────────
+let formDirty = false;
+function markDirty() {
+    formDirty = true;
+    const flag = document.getElementById('dirty-flag');
+    const placeholder = document.getElementById('dirty-placeholder');
+    if (flag) flag.classList.remove('hidden');
+    if (placeholder) placeholder.classList.add('hidden');
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    // Restore per-box collapse state. Boxes render collapsed by default; a stored
+    // '0' means the user expanded it, so re-open it. On a validation error, force
+    // everything open so the offending field can't be hidden.
+    document.querySelectorAll('.provider-body').forEach(function (body) {
+        const name = body.id.replace('pbody-', '');
+        let collapsed = true;
+        try { if (localStorage.getItem(COLLAPSE_KEY + name) === '0') collapsed = false; } catch (e) {}
+        if (HAS_ERROR) collapsed = false;
+        applyCollapsed(name, collapsed);
+    });
+    syncCollapseAllLabel();
+
+    // Dirty-track the main settings form only (not Add-provider / API-key forms).
+    const form = document.getElementById('settings-form');
+    if (form) {
+        form.addEventListener('input', markDirty);
+        form.addEventListener('change', markDirty);
+    }
+
+    // Warn before leaving with unsaved edits (covers left-nav links, reload, close).
+    // Any intentional form submit (Save, Remove, Add, Save key) clears the guard.
+    document.addEventListener('submit', function () { formDirty = false; });
+    window.addEventListener('beforeunload', function (e) {
+        if (formDirty) { e.preventDefault(); e.returnValue = ''; }
+    });
+});
 </script>
 
 {% endblock %}

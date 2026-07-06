@@ -25,22 +25,24 @@ This page is the full reference. For the day-to-day commands see [USAGE.md](./US
 
 Every LLM call the pipeline makes belongs to one of these **tasks**:
 
+Task names follow a `command_stage` convention so it's clear which command each one belongs to.
+
 | Task | When it runs |
 |---|---|
-| `extraction` | Reading a source, pulling out entities/concepts/takeaways (thinking mode) |
-| `extraction_retry` | The automatic retry if extraction fails |
-| `draft` | Writing/merging an entity or concept page |
-| `synthesis` | Composing the cited answer to a query |
-| `intent_classify` | Deciding whether a query is a real question or chitchat |
-| `chitchat` | Replying to "hi"/"thanks" without retrieval |
-| `contradiction` | `wiki lint --deep` contradiction checks |
+| `ingest_extract` | Reading a source, pulling out entities/concepts/takeaways (thinking mode) |
+| `ingest_extract_retry` | The automatic retry if extraction fails |
+| `ingest_draft` | Writing/merging an entity or concept page |
+| `query_intent` | Deciding whether a query is a real question or chitchat (opt-in; off by default) |
+| `query_chitchat` | Replying to "hi"/"thanks" without retrieval |
+| `query_synthesis` | Composing the cited answer to a query |
+| `lint_deep` | `wiki lint --deep` contradiction checks |
 
 Each task is routed to a named **provider profile**. The router resolves a task like this:
 
 1. `llm.task_providers.<task>` if set →
 2. otherwise `llm.default_provider`.
 
-So you can send everything to one provider (the default), or fan tasks out across several — e.g. run cheap/fast work locally and reserve a cloud model for `synthesis`.
+So you can send everything to one provider (the default), or fan tasks out across several — e.g. run cheap/fast work locally and reserve a cloud model for `query_synthesis`.
 
 ---
 
@@ -57,13 +59,13 @@ llm:
 
   # Which provider handles each pipeline task.
   task_providers:
-    extraction: ollama
-    extraction_retry: ollama
-    draft: ollama
-    synthesis: ollama
-    intent_classify: ollama
-    chitchat: ollama
-    contradiction: ollama
+    ingest_extract: ollama
+    ingest_extract_retry: ollama
+    ingest_draft: ollama
+    query_intent: ollama
+    query_chitchat: ollama
+    query_synthesis: ollama
+    lint_deep: ollama
 
   # Named, self-contained provider profiles.
   providers:
@@ -78,8 +80,8 @@ llm:
       num_predict: 8192
       # sparse per-task overrides
       tasks:
-        extraction: { num_predict: -1 }
-        chitchat:   { temperature: 1.0 }
+        ingest_extract: { num_predict: -1 }
+        query_chitchat: { temperature: 1.0 }
 ```
 
 Legacy configs (pre-multi-provider, with a flat `llm.provider` + `llm.model`) are upgraded automatically on load into a single `ollama` profile — no manual migration needed.
@@ -183,8 +185,8 @@ The point of profiles is mixing them. Set `default_provider` to your everyday ba
 llm:
   default_provider: ollama          # local for everything by default
   task_providers:
-    synthesis: anthropic            # …but answer queries with Claude
-    contradiction: anthropic        # …and run deep-lint reasoning on Claude
+    query_synthesis: anthropic      # …but answer queries with Claude
+    lint_deep: anthropic            # …and run deep-lint reasoning on Claude
   providers:
     ollama: { type: ollama-native, model: qwen3.6:35b, host: http://localhost:11434 }
     anthropic: { type: litellm, model: anthropic/claude-opus-4-8, temperature: 1.0, max_tokens: 8192 }
@@ -231,7 +233,7 @@ wiki providers set-key openai
 llm:
   default_provider: ollama
   task_providers:
-    synthesis: openai
+    query_synthesis: openai
   providers:
     ollama: { type: ollama-native, model: qwen3.6:35b, host: http://localhost:11434, thinking: true }
     openai: { type: litellm, model: openai/gpt-4o, temperature: 1.0, max_tokens: 8192 }
@@ -239,7 +241,7 @@ llm:
 
 ```bash
 wiki providers test openai
-wiki query "what's the main argument about X?"      # synthesis now runs on GPT-4o
+wiki query "what's the main argument about X?"      # query_synthesis now runs on GPT-4o
 ```
 
 ### 2. Point everything at a local vLLM server

@@ -75,8 +75,8 @@ def classify_intent(
     ]
 
     try:
-        client = router.client_for("intent_classify")
-        options = router.options_for("intent_classify")
+        client = router.client_for("query_intent")
+        options = router.options_for("query_intent")
         response = client.chat(messages, thinking=False, **options)
     except LLMError:
         return IntentResult(intent="wiki", raw_response="<classification failed>")
@@ -103,8 +103,8 @@ def generate_chitchat_reply(
     ]
 
     try:
-        client = router.client_for("chitchat")
-        options = router.options_for("chitchat")
+        client = router.client_for("query_chitchat")
+        options = router.options_for("query_chitchat")
         return client.chat(messages, thinking=False, **options).strip()
     except LLMError:
         return "Hi! Ask me a question about your wiki and I'll search for an answer."

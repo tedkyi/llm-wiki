@@ -571,8 +571,8 @@ def check_contradictions_deep(
     from .prompts import CONTRADICTION_DETECTION_PROMPT
 
     issues: list[LintIssue] = []
-    contradiction_client = router.client_for("contradiction")
-    contradiction_options = router.options_for("contradiction")
+    contradiction_client = router.client_for("lint_deep")
+    contradiction_options = router.options_for("lint_deep")
 
     # 1. Identify pairs of pages that share outgoing wikilinks
     page_link_sets: dict[str, set[str]] = {}

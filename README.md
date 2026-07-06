@@ -155,7 +155,7 @@ Routing is **per task**, so you can, say, keep token-heavy ingest local and answ
 llm:
   default_provider: ollama          # local for everything by default
   task_providers:
-    synthesis: anthropic            # …but answer queries with Claude
+    query_synthesis: anthropic      # …but answer queries with Claude
   providers:
     ollama:    { type: ollama-native, model: qwen3.6:35b, host: http://localhost:11434 }
     anthropic: { type: litellm, model: anthropic/claude-opus-4-8, max_tokens: 8192 }
@@ -379,7 +379,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v1.1.1** — production-ready for personal use.
+**Current version: v1.1.2** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|

@@ -17,6 +17,7 @@ Later stages add: ingest, query, lint, serve.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,29 @@ from .llm import (
     OllamaNotRunning,
     make_client,
 )
+
+def _force_utf8_console() -> None:
+    """Make stdout/stderr encode as UTF-8 for every ``wiki`` command.
+
+    On Windows the console's default code page (e.g. cp1252) can't encode emoji
+    or many Unicode characters, so printing them — especially when output is
+    redirected to a file or pipe — raises UnicodeEncodeError and crashes the
+    command. Reconfiguring to UTF-8 with ``errors="replace"`` makes output safe
+    regardless of how the command is launched. Encoding-only: it does not affect
+    program logic or file I/O.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # e.g. stream replaced by a test harness
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_console()
+
 
 app = typer.Typer(
     name="wiki",
@@ -971,7 +995,7 @@ def ingest(
     router = _build_router(
         paths,
         provider=provider,
-        tasks=("extraction", "extraction_retry", "draft"),
+        tasks=("ingest_extract", "ingest_extract_retry", "ingest_draft"),
     )
 
     mode = "batch" if batch else "interactive"
@@ -1195,10 +1219,11 @@ def query(
             "sources, synthesis. Default: all types."
         ),
     ),
-    no_intent_classify: bool = typer.Option(
+    intent_classify: bool = typer.Option(
         False,
-        "--no-intent-classify",
-        help="Skip intent classification step (saves ~3 sec per query).",
+        "--intent-classify/--no-intent-classify",
+        help="Classify intent before searching so pure chitchat ('hi', 'thanks') "
+        "skips retrieval. Off by default — it's slow and rarely worth the wait.",
     ),
     provider: Optional[str] = typer.Option(
         None,
@@ -1262,7 +1287,7 @@ def query(
     router = _build_router(
         paths,
         provider=provider,
-        tasks=("intent_classify", "chitchat", "synthesis"),
+        tasks=("query_intent", "query_chitchat", "query_synthesis"),
     )
 
     callbacks = CliQueryCallbacks()
@@ -1279,7 +1304,7 @@ def query(
             save_as=save_as,
             scope=scope,
             page_types=page_types,
-            classify_intent_first=not no_intent_classify,
+            classify_intent_first=intent_classify,
         )
     finally:
         router.close()
@@ -1482,7 +1507,7 @@ def lint(
         router = _build_router(
             paths,
             provider=provider,
-            tasks=("contradiction",),
+            tasks=("lint_deep",),
             fail_hint="Fast-only lint still works without an LLM — omit --deep.",
         )
 
