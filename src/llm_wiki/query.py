@@ -105,6 +105,30 @@ Rules:
    or meta-commentary about your process.
 """
 
+SYNTHESIS_SYSTEM_PROMPT_AUGMENTED = """You are answering questions by synthesizing content
+from an LLM-Wiki knowledge base, supplemented by your own general knowledge.
+
+Rules:
+1. Prefer the provided wiki pages and excerpts for claims about the specific
+   papers, entities, or concepts they cover. You may also draw on your own
+   general ML knowledge to add context, connections, or criticisms the
+   sources don't mention (e.g. related work, known limitations, how the
+   field's understanding has evolved since).
+2. Clearly distinguish sourced claims from unsourced ones. Cite every
+   source-backed claim with a [[wikilink]] using the same path format shown
+   in the source headers (e.g. [[entities/karpathy]], [[concepts/rag]]).
+   For claims drawn from your own knowledge rather than the sources, mark
+   them clearly (e.g. a trailing "Beyond the sources" section, or an inline
+   "(not in sources)" note) so the reader can tell the two apart.
+3. If the sources don't contain enough information to answer confidently,
+   say so explicitly, then supplement with general knowledge if you can —
+   clearly labeled as such.
+4. Be concise but substantive. Write in clean markdown (headers, bullets,
+   paragraphs as appropriate).
+5. Do NOT include YAML frontmatter, preamble like "Based on the sources:",
+   or meta-commentary about your process.
+"""
+
 
 def _build_synthesis_user_prompt(
     question: str, results: search.SearchResults
@@ -230,6 +254,7 @@ def run_query(
     scope: str = "wiki",  # 'wiki' | 'raw' | 'hybrid'
     page_types: list[str] | None = None,
     classify_intent_first: bool = False,
+    grounding: str = "strict",  # 'strict' | 'augmented'
 ) -> QueryResult:
     """Run a full query → answer pipeline.
 
@@ -246,6 +271,15 @@ def run_query(
     the user asked something like 'hi' or 'thanks', we skip retrieval and
     respond conversationally. Off by default — the extra LLM round-trip is
     slow and rarely worth it; callers opt in explicitly.
+
+    grounding controls how strictly synthesis sticks to the retrieved
+    excerpts:
+        - 'strict'    → answer only from the provided sources (default)
+        - 'augmented' → the model may supplement sources with its own
+          general knowledge, clearly labeling what isn't source-backed.
+          Useful since wiki pages are mostly extractive summaries of the
+          authors' own framing and won't include outside critiques or
+          connections to unindexed work.
     """
     callbacks.on_start(question, mode)
 
@@ -329,7 +363,12 @@ def run_query(
 
     # 2. Synthesize
     callbacks.on_synthesizing()
-    system_msg = prompts.ChatMessage(role="system", content=SYNTHESIS_SYSTEM_PROMPT)
+    system_prompt = (
+        SYNTHESIS_SYSTEM_PROMPT_AUGMENTED
+        if grounding == "augmented"
+        else SYNTHESIS_SYSTEM_PROMPT
+    )
+    system_msg = prompts.ChatMessage(role="system", content=system_prompt)
     user_msg = prompts.ChatMessage(
         role="user", content=_build_synthesis_user_prompt(question, results)
     )
