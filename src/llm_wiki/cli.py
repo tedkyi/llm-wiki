@@ -1230,6 +1230,12 @@ def query(
         "--provider",
         help="Force a specific provider profile for this query (overrides per-task routing).",
     ),
+    grounding: str = typer.Option(
+        "strict",
+        "--grounding",
+        help="strict: answer only from wiki sources. augmented: also draw on "
+        "the model's own knowledge, clearly labeling what isn't source-backed.",
+    ),
 ) -> None:
     """Ask a question: search the wiki, synthesize an answer with citations.
 
@@ -1252,6 +1258,10 @@ def query(
 
     if scope not in ("wiki", "raw", "hybrid"):
         _err(f"Invalid scope '{scope}'. Use wiki, raw, or hybrid.")
+        raise typer.Exit(code=1)
+
+    if grounding not in ("strict", "augmented"):
+        _err(f"Invalid grounding '{grounding}'. Use strict or augmented.")
         raise typer.Exit(code=1)
 
     page_types: list[str] | None = None
@@ -1305,6 +1315,7 @@ def query(
             scope=scope,
             page_types=page_types,
             classify_intent_first=intent_classify,
+            grounding=grounding,
         )
     finally:
         router.close()
