@@ -441,6 +441,17 @@ wiki serve --port 8080                  # Custom port
 wiki serve --no-browser                 # Don't auto-open browser
 ```
 
+### Serving the wiki over MCP
+
+Expose the wiki to other LLM sessions (Claude Desktop/Code, Cursor, custom agents) with four read-only tools — `search_wiki`, `read_wiki_page`, `ask_wiki`, `wiki_status` — over Streamable HTTP. Binds to localhost by default.
+
+```bash
+wiki mcp                                # Start on http://127.0.0.1:8010/mcp
+wiki mcp --root ~/Documents/LLM-Wiki    # Serve a specific wiki (default: auto-discover)
+```
+
+For what each tool returns, sample client configs, and security notes, see **[MCP.md](./MCP.md)**.
+
 ---
 
 ## Troubleshooting
@@ -563,6 +574,7 @@ Open `http://127.0.0.1:8000` and start adding documents.
 
 - **Project README** (architecture, internals, design decisions) — [README.md](./README.md)
 - **Providers guide** (configuring local/cloud LLM backends) — [PROVIDERS.md](./PROVIDERS.md)
+- **MCP guide** (exposing the wiki to other LLM sessions) — [MCP.md](./MCP.md)
 - **GitHub Issues** — https://github.com/NiharShrotri/llm-wiki/issues
 - **Karpathy's original LLM-Wiki gist** (the pattern this implements) — https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 
@@ -573,4 +585,4 @@ When reporting bugs, please include:
 
 ---
 
-*Last updated: LLM-Wiki v1.1.1*
+*Last updated: LLM-Wiki v1.2.0*

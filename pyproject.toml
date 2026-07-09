@@ -1,6 +1,6 @@
 [project]
 name = "llm-wiki"
-version = "0.8.1"
+version = "1.2.0"
 description = "An LLM-maintained personal wiki, per Karpathy's pattern. Local-first, enterprise-grade."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,7 +30,19 @@ dependencies = [
     "litellm>=1.91.0",
     "keyring>=25.7.0",
     "python-dotenv>=1.2.2",
+    # Stage 8 — MCP server (expose the wiki to other LLM sessions)
+    "mcp>=1.2.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [project.scripts]
 wiki = "llm_wiki.cli:app"
