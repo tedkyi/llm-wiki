@@ -43,17 +43,45 @@
 
 <div class="mb-6">
     <h1 class="text-2xl font-semibold text-white">Ingest</h1>
-    <p class="text-sm text-[#9ca3af]">Upload sources and watch Qwen3 read them. Jobs survive tab close and server restart.</p>
+    <p class="text-sm text-[#9ca3af]">Add sources and watch Qwen3 read them. Jobs survive tab close and server restart.</p>
 </div>
 
-<!-- Drop zone -->
-<div id="drop-zone"
-     class="drop-zone rounded-lg p-12 text-center cursor-pointer hover:bg-[#1a1e2c] transition mb-6">
-    <input type="file" id="file-input" class="hidden" multiple
-           accept=".pdf,.md,.markdown,.html,.htm,.docx,.txt">
-    <div class="text-4xl mb-2">📥</div>
-    <div class="text-white font-medium mb-1">Drop files here or click to upload</div>
-    <div class="text-xs text-[#6b7280]">PDF · Markdown · HTML · DOCX · TXT</div>
+<!-- Add by server path (primary) -->
+<div class="bg-[#1c1f2a] border border-[#2a2e3a] rounded-lg p-5 mb-4">
+    <div class="flex items-center justify-between mb-1">
+        <h2 class="text-sm font-medium text-white">Add by path</h2>
+        <span class="text-xs text-[#4ade80]">referenced in place · no copy</span>
+    </div>
+    <p class="text-xs text-[#9ca3af] mb-3">
+        One file or folder path per line (on this machine). Folders are walked recursively.
+        Surrounding quotes are fine (e.g. Explorer's “Copy as path”). PDF · Markdown · HTML · DOCX · TXT.
+    </p>
+    <textarea id="paths-input" rows="4"
+        class="w-full bg-[#0f1117] border border-[#2a2e3a] rounded p-3 text-sm text-white font-mono placeholder-[#6b7280] focus:outline-none focus:border-[#7c8cff]"
+        placeholder="D:\Data\papers\attention.pdf&#10;D:\Data\papers\classic"></textarea>
+    <div class="flex items-center justify-between mt-3 gap-3">
+        <div id="paths-result" class="text-xs text-[#9ca3af] min-w-0 truncate"></div>
+        <button type="button" id="add-paths-btn"
+            class="flex-shrink-0 text-sm px-4 py-2 bg-[#7c8cff] hover:bg-[#6a7bff] text-white rounded font-medium transition">
+            Add sources
+        </button>
+    </div>
+</div>
+
+<!-- Upload from browser (secondary — copies) -->
+<div class="mb-6">
+    <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xs uppercase tracking-wide text-[#9ca3af] font-medium">Or upload from your browser</h2>
+        <span class="text-xs text-[#facc15]">⚠ creates a copy in raw/</span>
+    </div>
+    <div id="drop-zone"
+         class="drop-zone rounded-lg p-6 text-center cursor-pointer hover:bg-[#1a1e2c] transition">
+        <input type="file" id="file-input" class="hidden" multiple
+               accept=".pdf,.md,.markdown,.html,.htm,.docx,.txt">
+        <div class="text-2xl mb-1">📥</div>
+        <div class="text-white text-sm font-medium mb-1">Drop files here or click to upload</div>
+        <div class="text-xs text-[#6b7280]">No path on this machine? Upload copies the bytes into raw/. Prefer “Add by path” above to reference in place.</div>
+    </div>
 </div>
 
 <!-- Pending sources -->
@@ -117,7 +145,7 @@
             </div>
             {% endfor %}
         {% else %}
-            <div class="p-6 text-sm text-center text-[#6b7280]">No jobs yet. Upload a file to start.</div>
+            <div class="p-6 text-sm text-center text-[#6b7280]">No jobs yet. Add a source to start.</div>
         {% endif %}
     </div>
 </div>
@@ -137,6 +165,9 @@
 (function() {
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
+    const pathsInput = document.getElementById('paths-input');
+    const addPathsBtn = document.getElementById('add-paths-btn');
+    const pathsResult = document.getElementById('paths-result');
     const jobsList = document.getElementById('jobs-list');
     const watcher = document.getElementById('job-watcher');
     const logEl = document.getElementById('live-log');
@@ -170,6 +201,40 @@
             alert('Upload failed: ' + (await r.text()));
         }
     }
+
+    // --- Add by server path (primary) ---
+    addPathsBtn.addEventListener('click', async () => {
+        const text = pathsInput.value.trim();
+        if (!text) { pathsResult.textContent = 'Enter at least one path.'; return; }
+        addPathsBtn.disabled = true;
+        addPathsBtn.textContent = 'Adding…';
+        pathsResult.textContent = '';
+        try {
+            const fd = new FormData();
+            fd.append('paths', text);
+            const r = await fetch('/ingest/add-paths', { method: 'POST', body: fd });
+            if (!r.ok) { pathsResult.textContent = 'Failed: ' + (await r.text()); return; }
+            const data = await r.json();
+            const items = data.items || [];
+            const added = items.filter(i => i.result === 'ADDED').length;
+            const updated = items.filter(i => i.result === 'UPDATED').length;
+            const deduped = items.filter(i => i.result === 'DEDUPED').length;
+            const problems = items.filter(i => !['ADDED', 'UPDATED', 'DEDUPED'].includes(i.result));
+            if (added + updated > 0) {
+                // Reload so the pending list shows the new / re-queued sources.
+                window.location.reload();
+                return;
+            }
+            let msg = `${added} added · ${updated} updated · ${deduped} already tracked`;
+            if (problems.length) {
+                msg += ` · ${problems.length} skipped (${escapeHtml(problems[0].message || problems[0].result)})`;
+            }
+            pathsResult.textContent = msg;
+        } finally {
+            addPathsBtn.disabled = false;
+            addPathsBtn.textContent = 'Add sources';
+        }
+    });
 
     // --- Start ingest ---
     document.querySelectorAll('.start-job-btn').forEach(btn => {

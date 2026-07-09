@@ -79,7 +79,7 @@ async def source_detail(request: Request, source_id: int) -> HTMLResponse:
     if row is None:
         raise HTTPException(status_code=404, detail=f"No source with id {source_id}")
 
-    file_path = paths.root / row["relpath"]
+    file_path = ingest_raw.source_path(paths, row["relpath"])
     parsed = None
     preview = ""
     error: str | None = None

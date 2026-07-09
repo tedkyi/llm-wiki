@@ -23,6 +23,7 @@ from . import slugify
 
 class AddResult(str, Enum):
     ADDED = "added"
+    UPDATED = "updated"          # already-tracked path whose content changed
     DEDUPED = "deduped"
     SKIPPED_EMPTY = "skipped_empty"
     SKIPPED_UNSUPPORTED = "skipped_unsupported"
@@ -87,8 +88,21 @@ def _is_inside_raw(path: Path, raw_dir: Path) -> bool:
         return False
 
 
+def source_path(paths: cfg.WikiPaths, relpath: str) -> Path:
+    """Resolve a source row's stored path to an absolute filesystem path.
+
+    A source's location is stored either as a project-root-relative path (files
+    copied into raw/, plus all legacy rows) or as an absolute path (files
+    *referenced* in place — the default for `wiki add`). This helper centralizes
+    that distinction so callers never blindly do ``paths.root / relpath``, which
+    silently mishandles absolute paths (fragile on Windows in particular).
+    """
+    p = Path(relpath)
+    return p if p.is_absolute() else paths.root / p
+
+
 # ---------------------------------------------------------------------------
-# Text mirrors: raw-text/<original-filename>.md
+# Text mirrors: raw-text/<source-id>-<original-filename>.md
 # ---------------------------------------------------------------------------
 # The search backend (QMD) only understands plain text / markdown, so for
 # every source in raw/ we persist the parser-extracted text as a markdown
@@ -96,34 +110,49 @@ def _is_inside_raw(path: Path, raw_dir: Path) -> bool:
 # indexed for full-document search.
 
 
-def text_mirror_path(paths: cfg.WikiPaths, source_file: Path) -> Path:
-    """Return the raw-text/ mirror path for a file in raw/.
+def _mirror_slug(source_file: Path) -> str:
+    """Slugified original filename (extension included, so 'foo.pdf' and
+    'foo.txt' stay distinct: 'foo-pdf' / 'foo-txt')."""
+    return slugify.slugify(source_file.name, max_length=120)
 
-    The name is the slugified original filename (extension included, so
-    'foo.pdf' and 'foo.txt' stay distinct: 'foo-pdf.md' / 'foo-txt.md').
+
+def _legacy_mirror_path(paths: cfg.WikiPaths, source_file: Path) -> Path:
+    """The pre-source-id mirror name (`<slug>.md`). Kept only so touching a
+    source can clean up its old mirror after the id-based rename."""
+    return paths.raw_text / f"{_mirror_slug(source_file)}.md"
+
+
+def text_mirror_path(
+    paths: cfg.WikiPaths, source_id: int, source_file: Path
+) -> Path:
+    """Return the raw-text/ mirror path for a source.
+
+    Keyed on the source id (`<id>-<slug>.md`) so two referenced files that share
+    a basename but live in different directories don't collide on one mirror.
     Slugs contain only [a-z0-9-], which QMD's internal path slugging leaves
-    untouched — this keeps QMD's reported document paths mappable back to
-    the file on disk. The original filename is recorded in the mirror's
-    frontmatter (source_file).
+    untouched — this keeps QMD's reported document paths mappable back to the
+    file on disk. The original filename is recorded in the mirror's frontmatter
+    (source_file).
     """
-    slug = slugify.slugify(source_file.name, max_length=120)
-    return paths.raw_text / f"{slug}.md"
+    return paths.raw_text / f"{source_id}-{_mirror_slug(source_file)}.md"
 
 
 def write_text_mirror(
-    paths: cfg.WikiPaths, source_file: Path, parsed
+    paths: cfg.WikiPaths, source_id: int, source_file: Path, parsed
 ) -> Path:
     """Write the extracted text of a parsed source to its raw-text/ mirror.
 
     The mirror gets minimal frontmatter (title + provenance) and an H1 so
-    QMD can extract a meaningful title for search results.
+    QMD can extract a meaningful title for search results. Any legacy
+    (`<slug>.md`) mirror for this source is removed so the search index doesn't
+    end up with two copies of the same content after the id-based rename.
     """
-    mirror = text_mirror_path(paths, source_file)
+    mirror = text_mirror_path(paths, source_id, source_file)
     mirror.parent.mkdir(parents=True, exist_ok=True)
     try:
         source_rel = str(source_file.relative_to(paths.root)).replace("\\", "/")
     except ValueError:
-        source_rel = source_file.name
+        source_rel = str(source_file).replace("\\", "/")
     title = (parsed.title or source_file.stem).strip()
     safe_title = title.replace('"', "'")
     content = (
@@ -138,19 +167,34 @@ def write_text_mirror(
         f"{parsed.text}\n"
     )
     mirror.write_text(content, encoding="utf-8")
+    legacy = _legacy_mirror_path(paths, source_file)
+    if legacy != mirror and legacy.exists():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
     return mirror
 
 
-def delete_text_mirror(paths: cfg.WikiPaths, source_file: Path) -> bool:
-    """Remove the raw-text/ mirror for a source file, if present."""
-    mirror = text_mirror_path(paths, source_file)
-    if mirror.exists():
-        try:
-            mirror.unlink()
-            return True
-        except OSError:
-            return False
-    return False
+def delete_text_mirror(
+    paths: cfg.WikiPaths, source_id: int, source_file: Path
+) -> bool:
+    """Remove the raw-text/ mirror(s) for a source, if present.
+
+    Removes both the id-based name and any leftover legacy (`<slug>.md`) mirror.
+    """
+    deleted = False
+    for mirror in (
+        text_mirror_path(paths, source_id, source_file),
+        _legacy_mirror_path(paths, source_file),
+    ):
+        if mirror.exists():
+            try:
+                mirror.unlink()
+                deleted = True
+            except OSError:
+                pass
+    return deleted
 
 
 @dataclass
@@ -177,13 +221,13 @@ def backfill_text_mirrors(
     rows = list_sources(paths)
     total = len(rows)
     for i, row in enumerate(rows, start=1):
-        source_file = paths.root / row["relpath"]
+        source_file = source_path(paths, row["relpath"])
         if progress is not None:
             progress(row["relpath"], i, total)
         if not source_file.exists():
             stats.missing_file += 1
             continue
-        if not force and text_mirror_path(paths, source_file).exists():
+        if not force and text_mirror_path(paths, row["id"], source_file).exists():
             stats.skipped_existing += 1
             continue
         try:
@@ -191,7 +235,7 @@ def backfill_text_mirrors(
         except parsers.ParserError as e:
             stats.parse_errors.append(f"{row['relpath']}: {e}")
             continue
-        write_text_mirror(paths, source_file, parsed)
+        write_text_mirror(paths, row["id"], source_file, parsed)
         stats.written += 1
     return stats
 
@@ -200,15 +244,21 @@ def add_file(
     paths: cfg.WikiPaths,
     source: Path,
     *,
-    copy: bool = True,
+    copy: bool = False,
 ) -> AddOutcome:
-    """Add a single file to the wiki's raw/ directory and register it.
+    """Register a source file with the wiki.
+
+    By default the file is *referenced in place* — its absolute path is stored
+    and no copy is made (saving disk for content that already lives on the
+    machine). Pass ``copy=True`` to fall back to the old behavior of copying the
+    file into raw/ (used by ``wiki add --copy`` and by web uploads, whose bytes
+    have no external path to reference).
 
     Args:
         paths: Resolved wiki project paths.
         source: The file to add (can be anywhere on disk).
-        copy: If True, copy the file into raw/. If False (used when the file
-              is already inside raw/), skip the copy and just parse + register.
+        copy: If True, copy the file into raw/ and register the copy. If False
+              (default), reference the file where it is.
 
     Returns:
         AddOutcome describing what happened. Check `.result` for the variant.
@@ -266,71 +316,109 @@ def add_file(
     except ValueError:
         relpath = str(final_path)
 
-    # Dedupe by content hash
     with db.connect(paths.state_db) as conn:
-        existing = conn.execute(
-            "SELECT id, relpath FROM sources WHERE content_hash = ?",
-            (parsed.content_hash,),
+        # 1. Is this exact path already tracked? If so, a re-add is either a
+        #    no-op (unchanged) or an in-place update (content changed).
+        by_path = conn.execute(
+            "SELECT id, content_hash FROM sources WHERE relpath = ?",
+            (relpath,),
         ).fetchone()
 
-        if existing is not None:
-            # If we just copied this in, remove the duplicate copy.
-            if copy and final_path.exists() and final_path != source:
-                try:
-                    final_path.unlink()
-                except OSError:
-                    pass
-            return AddOutcome(
-                result=AddResult.DEDUPED,
-                source_path=final_path,
-                relpath=relpath,
-                title=parsed.title,
-                file_type=parsed.file_type,
-                bytes=parsed.bytes,
-                word_count=parsed.word_count,
-                content_hash=parsed.content_hash,
-                source_id=existing["id"],
-                message=f"Already tracked as #{existing['id']}: {existing['relpath']}",
+        if by_path is not None:
+            if by_path["content_hash"] == parsed.content_hash:
+                return AddOutcome(
+                    result=AddResult.DEDUPED,
+                    source_path=final_path,
+                    relpath=relpath,
+                    title=parsed.title,
+                    file_type=parsed.file_type,
+                    bytes=parsed.bytes,
+                    word_count=parsed.word_count,
+                    content_hash=parsed.content_hash,
+                    source_id=by_path["id"],
+                    message=f"Already tracked as #{by_path['id']} (unchanged)",
+                )
+            # Same path, new content: refresh the row and re-queue for ingest.
+            conn.execute(
+                """
+                UPDATE sources
+                   SET content_hash = ?, file_type = ?, bytes = ?,
+                       status = 'pending', last_ingested = NULL
+                 WHERE id = ?
+                """,
+                (parsed.content_hash, parsed.file_type, parsed.bytes, by_path["id"]),
             )
-
-        # Warn on near-empty extraction (likely scanned PDF)
-        if parsed.is_empty:
-            # We still register it so the user sees it in `wiki sources list`
-            # with SKIPPED_EMPTY status, but flag it loudly.
-            status = "error"
+            source_id = by_path["id"]
+            result_kind = AddResult.UPDATED
             message = (
-                f"Extracted only {parsed.word_count} words — likely a scanned "
-                f"PDF or empty file. OCR not yet supported."
+                f"Source already tracked as #{source_id}; content changed — "
+                f"marked for re-ingestion (run wiki ingest)."
             )
-            result_kind = AddResult.SKIPPED_EMPTY
         else:
-            status = "pending"
-            message = f"Added as #{'?'}: {parsed.title}"
-            result_kind = AddResult.ADDED
+            # 2. Not tracked by path — dedupe identical content added elsewhere.
+            existing = conn.execute(
+                "SELECT id, relpath FROM sources WHERE content_hash = ?",
+                (parsed.content_hash,),
+            ).fetchone()
 
-        cur = conn.execute(
-            """
-            INSERT INTO sources (relpath, content_hash, file_type, bytes, added_at, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                relpath,
-                parsed.content_hash,
-                parsed.file_type,
-                parsed.bytes,
-                _now_iso(),
-                status,
-            ),
-        )
-        source_id = cur.lastrowid
-        if "#'?'" in message:
-            message = message.replace("#'?'", f"#{source_id}")
+            if existing is not None:
+                # If we just copied this in, remove the duplicate copy.
+                if copy and final_path.exists() and final_path != source:
+                    try:
+                        final_path.unlink()
+                    except OSError:
+                        pass
+                return AddOutcome(
+                    result=AddResult.DEDUPED,
+                    source_path=final_path,
+                    relpath=relpath,
+                    title=parsed.title,
+                    file_type=parsed.file_type,
+                    bytes=parsed.bytes,
+                    word_count=parsed.word_count,
+                    content_hash=parsed.content_hash,
+                    source_id=existing["id"],
+                    message=f"Already tracked as #{existing['id']}: {existing['relpath']}",
+                )
+
+            # 3. Genuinely new source.
+            if parsed.is_empty:
+                # We still register it so the user sees it in `wiki sources list`
+                # with SKIPPED_EMPTY status, but flag it loudly.
+                status = "error"
+                message = (
+                    f"Extracted only {parsed.word_count} words — likely a scanned "
+                    f"PDF or empty file. OCR not yet supported."
+                )
+                result_kind = AddResult.SKIPPED_EMPTY
+            else:
+                status = "pending"
+                message = f"Added as #{'?'}: {parsed.title}"
+                result_kind = AddResult.ADDED
+
+            cur = conn.execute(
+                """
+                INSERT INTO sources (relpath, content_hash, file_type, bytes, added_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    relpath,
+                    parsed.content_hash,
+                    parsed.file_type,
+                    parsed.bytes,
+                    _now_iso(),
+                    status,
+                ),
+            )
+            source_id = cur.lastrowid
+            if "#'?'" in message:
+                message = message.replace("#'?'", f"#{source_id}")
 
     # Persist the extracted text so the search backend has real content to
-    # index (it can't parse PDFs/DOCX). Empty extractions have nothing useful.
-    if result_kind == AddResult.ADDED:
+    # index (it can't parse PDFs/DOCX). A content update rewrites the mirror too.
+    if result_kind in (AddResult.ADDED, AddResult.UPDATED):
         try:
-            write_text_mirror(paths, final_path, parsed)
+            write_text_mirror(paths, source_id, final_path, parsed)
         except OSError:
             pass  # mirror is best-effort; backfill can recreate it
 
@@ -346,6 +434,19 @@ def add_file(
         source_id=source_id,
         message=message,
     )
+
+
+def strip_path_quotes(text: str) -> str:
+    """Strip one pair of surrounding single/double quotes from a pasted path.
+
+    Windows Explorer's "Copy as path" wraps the path in double quotes, and
+    Windows filenames can't contain quotes anyway — so removing a matched
+    surrounding pair makes copy-pasted quoted paths just work.
+    """
+    s = text.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
 
 
 def iter_addable_files(root: Path, recursive: bool) -> Iterable[Path]:
@@ -421,7 +522,7 @@ def mark_source_pending(
     if row is None:
         return False, f"No source with id {source_id}"
 
-    file_path = paths.root / row["relpath"]
+    file_path = source_path(paths, row["relpath"])
     if not file_path.exists():
         return False, f"Source file no longer on disk: {row['relpath']}"
 
@@ -438,15 +539,16 @@ def mark_source_pending(
 def remove_source(
     paths: cfg.WikiPaths, source_id: int, delete_file: bool = True
 ) -> tuple[bool, str]:
-    """Remove a source from tracking. Optionally delete the file from raw/.
+    """Remove a source from tracking.
 
-    Returns (success, message).
+    Only *copied* files (those living under raw/) are deleted from disk;
+    *referenced* files are always left in place. Returns (success, message).
     """
     row = get_source(paths, source_id)
     if row is None:
         return False, f"No source with id {source_id}"
 
-    file_path = paths.root / row["relpath"]
+    file_path = source_path(paths, row["relpath"])
 
     with db.connect(paths.state_db) as conn:
         # Cascade: remove source_pages rows first (no FK CASCADE by default)
@@ -454,7 +556,7 @@ def remove_source(
         conn.execute("DELETE FROM ingest_runs WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
 
-    delete_text_mirror(paths, file_path)
+    delete_text_mirror(paths, source_id, file_path)
 
     deleted_file = False
     if delete_file and file_path.exists() and _is_inside_raw(file_path, paths.raw):
@@ -468,5 +570,5 @@ def remove_source(
     if deleted_file:
         msg += " — file deleted from raw/"
     elif delete_file:
-        msg += " — file was outside raw/, left in place"
+        msg += " — referenced file left in place"
     return True, msg

@@ -528,7 +528,9 @@ def ingest_source(
             return result
         source_row = dict(row)
 
-    file_path = paths.root / source_row["relpath"]
+    from . import ingest_raw
+
+    file_path = ingest_raw.source_path(paths, source_row["relpath"])
     logger.section(f"INGEST SOURCE #{source_id}")
     logger.info(f"relpath : {source_row['relpath']}")
     logger.info(f"started : {started}")

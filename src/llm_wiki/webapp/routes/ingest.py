@@ -1,10 +1,11 @@
 """Ingest route — persistent-jobs version.
 
 Flow:
-  1. GET /ingest — landing page with drag-drop upload + pending list + recent jobs
-  2. POST /ingest/upload — accept files, copy into raw/, register sources
-  3. POST /ingest/start — create a job for a given source_id, queue it
-  4. GET /ingest/jobs/{job_id}/stream — SSE: replay history + live tail
+  1. GET /ingest — landing page with add-by-path + drag-drop upload + pending + jobs
+  2. POST /ingest/add-paths — reference server-side files/folders in place (primary)
+  3. POST /ingest/upload — accept browser uploads, copy into raw/, register sources
+  4. POST /ingest/start — create a job for a given source_id, queue it
+  5. GET /ingest/jobs/{job_id}/stream — SSE: replay history + live tail
 
 Because progress is persisted in SQLite (via jobs.py), closing the tab and
 coming back still shows full history. Multiple tabs can watch the same job.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -37,19 +39,63 @@ async def ingest_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.post("/ingest/add-paths")
+async def ingest_add_paths(request: Request) -> JSONResponse:
+    """Reference one or more server-side files/folders (one path per line).
+
+    This is the primary, disk-efficient way to add sources: nothing is copied —
+    each file is registered in place. Folders are walked recursively.
+    """
+    paths: cfg.WikiPaths = request.app.state.wiki_paths
+    form = await request.form()
+    raw = str(form.get("paths") or "")
+    lines = [ingest_raw.strip_path_quotes(ln) for ln in raw.splitlines() if ln.strip()]
+
+    results: list[dict] = []
+    for line in lines:
+        target = Path(line).expanduser()
+        found = list(ingest_raw.iter_addable_files(target, recursive=True))
+        if not found:
+            if not target.exists():
+                msg, result = "Not found on server", "ERROR"
+            elif target.is_file():
+                msg, result = "Unsupported file type", "SKIPPED_UNSUPPORTED"
+            else:
+                msg, result = "No supported files in folder", "SKIPPED_UNSUPPORTED"
+            results.append({"path": line, "result": result, "message": msg, "source_id": None})
+            continue
+        for f in found:
+            outcome = ingest_raw.add_file(paths, f, copy=False)
+            results.append(
+                {
+                    "path": str(f),
+                    "result": outcome.result.name,
+                    "message": outcome.message,
+                    "source_id": outcome.source_id,
+                }
+            )
+    return JSONResponse({"ok": True, "items": results})
+
+
 @router.post("/ingest/upload")
 async def ingest_upload(
     request: Request, files: list[UploadFile] = File(...)
 ) -> JSONResponse:
+    """Accept browser file uploads. Unlike add-paths, this necessarily *copies*
+    the bytes into raw/ — a browser upload has no server-side path to reference.
+    """
     paths: cfg.WikiPaths = request.app.state.wiki_paths
     paths.raw.mkdir(parents=True, exist_ok=True)
     results = []
     for up in files:
         if not up.filename:
             continue
-        dest = paths.raw / up.filename
+        # A browser upload is only bytes; give it a non-clobbering home in raw/.
+        dest = ingest_raw._unique_destination(paths.raw, up.filename)
         content = await up.read()
         dest.write_bytes(content)
+        # copy=False: the bytes are already materialized at `dest` inside raw/,
+        # so it's registered as a (delete-safe) copy without a second write.
         outcome = ingest_raw.add_file(paths, dest, copy=False)
         results.append(
             {

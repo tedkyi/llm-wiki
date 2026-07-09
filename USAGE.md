@@ -108,7 +108,7 @@ You have two options. Both end up with the document processed and filed into you
 #### Option A — Web UI (recommended for one-off files)
 
 1. Open `http://127.0.0.1:8000/ingest`
-2. Drag your file into the drop zone (or click to browse)
+2. **Add by path** (primary): paste one file or folder path per line into the box and click **Add sources** — files are referenced in place, no copy. (Surrounding quotes, e.g. Explorer's "Copy as path", are fine.) Or drag files into the drop zone below to **upload** them, which *copies* the bytes into `raw/`.
 3. The file appears under **Pending Sources**
 4. Click **Ingest →** next to the file
 5. Watch the live log as Qwen3 reads, extracts, and writes wiki pages
@@ -118,7 +118,7 @@ You have two options. Both end up with the document processed and filed into you
 #### Option B — CLI (recommended for many files)
 
 ```bash
-# Copy all PDFs from a folder into raw/ and register them
+# Register all PDFs from a folder (referenced in place; add --copy to copy into raw/)
 wiki add ~/Downloads/research-papers/ -r
 
 # Check what's pending
@@ -165,7 +165,7 @@ wiki query "summarize my sources" --intent-classify
 
 ### Cleaning up: deleting a source
 
-This removes a source from tracking and deletes the file from `raw/`. **It does NOT delete wiki pages that were created from this source** — those stay as "orphaned knowledge" (run `wiki lint --fix` afterward to clean up dangling references).
+This removes a source from tracking. If the source was **copied** into `raw/`, that copy is deleted; a **referenced** file (the default for `wiki add`) is left untouched on disk. **It does NOT delete wiki pages that were created from this source** — those stay as "orphaned knowledge" (run `wiki lint --fix` afterward to clean up dangling references).
 
 #### Web UI
 
@@ -177,8 +177,8 @@ This removes a source from tracking and deletes the file from `raw/`. **It does 
 #### CLI
 
 ```bash
-wiki sources rm 3          # source ID 3
-wiki sources rm 3 --keep-file   # unlink from DB but leave the file in raw/
+wiki sources rm 3          # source ID 3 (deletes the raw/ copy; leaves a referenced file in place)
+wiki sources rm 3 --keep-file   # unlink from DB but never touch the file on disk
 ```
 
 ---
@@ -191,6 +191,8 @@ Useful when:
 - You've edited the source file and want new pages written
 
 Re-ingesting **merges into existing wiki pages** rather than duplicating them.
+
+**Tip:** if you edited the file on disk, just run `wiki add <path>` again — it detects the changed content, updates the source in place, and marks it pending, so you can skip straight to `wiki ingest`.
 
 #### Web UI
 
@@ -349,10 +351,11 @@ wiki init ~/path/to/new-wiki    # Initialize a new wiki in a given folder
 ### Managing sources (raw documents)
 
 ```bash
-# Add files to the raw collection
+# Add sources — referenced in place by default (no copy into raw/)
 wiki add file.pdf                       # Add a single file
-wiki add ~/Downloads/docs/ -r           # Add a folder recursively
+wiki add a.pdf b.pdf ~/Downloads/docs/ -r   # Multiple files/folders in one call
 wiki add *.md                           # Add with glob
+wiki add paper.pdf --copy               # Copy into raw/ instead of referencing
 
 # List and inspect
 wiki sources list                       # All sources
@@ -362,8 +365,8 @@ wiki sources list --tail 20             # Only the last 20 sources
 wiki sources show 3                     # Details for source ID 3
 
 # Remove
-wiki sources rm 3                       # Remove and delete file from raw/
-wiki sources rm 3 --keep-file           # Remove from DB only
+wiki sources rm 3                       # Remove from DB; delete the raw/ copy (referenced files left in place)
+wiki sources rm 3 --keep-file           # Remove from DB only; never touch the file
 ```
 
 ### Ingesting into the wiki
@@ -538,31 +541,65 @@ Most users won't need this — the project is already set up. Include for comple
 - **Python 3.11+** (the project is built against 3.13)
 - **Node.js 22+** (needed for QMD, the search engine)
 - **Homebrew SQLite** — `brew install sqlite` (for QMD's vector extensions)
-- **~30GB free disk space** (for Qwen3.6-35B and QMD's support models)
+- **An LLM backend** — Ollama + a local model (fully local), or the Claude Code CLI / a cloud provider (see step 5 and [PROVIDERS.md](./PROVIDERS.md))
+- **~30GB free disk space** for the fully-local Ollama setup (Qwen3.6-35B + QMD's support models); far less with Claude Code or a cloud provider — just QMD's ~2GB models
 
 ### Install
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/NiharShrotri/llm-wiki.git
-cd llm-wiki
+Steps 1-4 are needed for **every** setup; step 5 is where you pick the LLM backend.
 
-# 2. Create venv and install
+**1. Clone the repo:**
+
+```bash
+git clone https://github.com/tedkyi/llm-wiki.git
+cd llm-wiki
+```
+
+**2. Create a venv and install:**
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+```
 
-# 3. Install QMD (the search backend)
+**3. Install QMD** (the local search backend):
+
+```bash
 npm install -g @tobilu/qmd
+```
 
-# 4. Install Ollama and pull the model
+**4. Initialize the wiki structure:**
+
+```bash
+wiki init .
+```
+
+**5. Pick your LLM backend:**
+
+*Option A — Fully local with Ollama (default).* `wiki init` already routes every task here; just pull the model:
+
+```bash
 # Get Ollama from https://ollama.com (or brew install --cask ollama)
 ollama pull qwen3.6:35b
+```
 
-# 5. Initialize the wiki structure
-wiki init .
+*Option B — Claude Code, a cloud API, or another provider (no Ollama).* Sign in to the [`claude` CLI](https://claude.com/claude-code), then point the wiki at it by editing `.wiki/config.yml` (or from the web UI **Settings** page):
 
-# 6. Start serving
+```yaml
+llm:
+  default_provider: claude-code
+  providers:
+    claude-code:
+      type: claude-code
+      model: claude-opus-4-8
+```
+
+OpenAI, Anthropic (API), Gemini, vLLM, and LM Studio are configured the same way — see [PROVIDERS.md](./PROVIDERS.md).
+
+**6. Start serving:**
+
+```bash
 wiki serve
 ```
 
@@ -575,7 +612,7 @@ Open `http://127.0.0.1:8000` and start adding documents.
 - **Project README** (architecture, internals, design decisions) — [README.md](./README.md)
 - **Providers guide** (configuring local/cloud LLM backends) — [PROVIDERS.md](./PROVIDERS.md)
 - **MCP guide** (exposing the wiki to other LLM sessions) — [MCP.md](./MCP.md)
-- **GitHub Issues** — https://github.com/NiharShrotri/llm-wiki/issues
+- **GitHub Issues** — https://github.com/tedkyi/llm-wiki/issues
 - **Karpathy's original LLM-Wiki gist** (the pattern this implements) — https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 
 When reporting bugs, please include:
@@ -585,4 +622,4 @@ When reporting bugs, please include:
 
 ---
 
-*Last updated: LLM-Wiki v1.2.0*
+*Last updated: LLM-Wiki v1.2.1*
