@@ -1664,6 +1664,76 @@ def serve(
         console.print("\n[dim]Stopped.[/dim]")
 
 
+@app.command()
+def mcp(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address. Default 127.0.0.1 (localhost only). A non-loopback "
+        "address exposes the wiki to your network with no authentication.",
+    ),
+    port: int = typer.Option(
+        8010,
+        "--port",
+        "-p",
+        help="Port to listen on. Default 8010 (distinct from the web UI's 8000).",
+    ),
+    path: str = typer.Option(
+        "/mcp",
+        "--path",
+        help="HTTP path the MCP endpoint is mounted at.",
+    ),
+    root: Optional[str] = typer.Option(
+        None,
+        "--root",
+        help="Wiki project root. Defaults to auto-discovery from the current dir.",
+    ),
+) -> None:
+    """Serve the wiki over MCP (Model Context Protocol) via Streamable HTTP.
+
+    Lets other LLM sessions (Claude Desktop/Code, Cursor, custom agents) query
+    this wiki with four read-only tools: search_wiki, read_wiki_page, ask_wiki,
+    and wiki_status. Binds to localhost by default.
+    """
+    # Lazy import — keep the MCP SDK off the path for every other command.
+    try:
+        from .mcp import adapter, server
+    except ImportError as e:
+        _err(f"MCP dependencies not installed: {e}")
+        _hint("Install with: uv pip install -e .")
+        raise typer.Exit(code=1)
+
+    try:
+        ctx = adapter.bind_project(root)
+    except adapter.WikiError as e:
+        _err(str(e))
+        _hint("Run `wiki init` in an empty folder to create a project.")
+        raise typer.Exit(code=1)
+
+    url = f"http://{host}:{port}{path}"
+    console.print()
+    console.print(
+        Panel.fit(
+            f"[bold]LLM-Wiki[/bold] MCP server starting…\n\n"
+            f"  URL: [bold cyan]{url}[/bold cyan]\n"
+            f"  Transport: [dim]streamable-http[/dim]\n"
+            f"  Tools: [dim]search_wiki, read_wiki_page, ask_wiki, wiki_status[/dim]\n"
+            f"  Project: [dim]{ctx.paths.root}[/dim]\n\n"
+            f"[dim]Press Ctrl+C to stop.[/dim]",
+            title="🔌 MCP",
+            border_style="cyan",
+        )
+    )
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        _warn(f"Binding to {host} — the wiki is reachable from the network with no auth.")
+
+    mcp_server = server.build_server(ctx, host=host, port=port, path=path)
+    try:
+        mcp_server.run(transport="streamable-http")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+
+
 def main() -> None:
     """Entry point used by the `wiki` console script."""
     app()

@@ -65,6 +65,15 @@ A full web interface at `http://127.0.0.1:8000` after `wiki serve`:
 - **Graph** — D3 force-directed visualization of the full wiki, color-coded by page type
 - **Settings** — configure LLM providers (add profiles from presets, set per-task routing, manage API keys)
 
+### MCP server
+Expose the wiki to other LLM sessions (Claude Desktop/Code, Cursor, custom agents) over the [Model Context Protocol](https://modelcontextprotocol.io). Run `wiki mcp` to serve four **read-only** tools over Streamable HTTP:
+- **`search_wiki`** — RAG-style retrieval: ranked hits with full page content (no LLM call)
+- **`read_wiki_page`** — fetch one page's full markdown by path
+- **`ask_wiki`** — the full retrieve→synthesize pipeline, returning a cited answer just like the CLI/web UI
+- **`wiki_status`** — backend health, collection list, and page/source counts
+
+Use it two ways: as a **document store** another agent pulls context from, or as a **teammate** it asks synthesized questions of. Binds to localhost by default. **Full guide: [MCP.md](./MCP.md).**
+
 ### Supported input formats
 `.pdf` · `.md` · `.html` · `.docx` · `.txt`
 
@@ -263,8 +272,9 @@ open wiki/   # then "Open folder as vault"
 | `wiki providers test <provider>` | Check that a provider profile is reachable / authenticated |
 | `wiki status` | Show project stats, paths, config, backend health |
 | `wiki serve [--port N]` | Launch the web UI at `http://127.0.0.1:8000` |
+| `wiki mcp [--port N] [--host H] [--path P]` | Serve the wiki over MCP (Streamable HTTP) for other LLM sessions |
 
-Run `wiki <command> --help` for full options on any command. See [USAGE.md](./USAGE.md) for a full walkthrough and [PROVIDERS.md](./PROVIDERS.md) for configuring LLM providers.
+Run `wiki <command> --help` for full options on any command. See [USAGE.md](./USAGE.md) for a full walkthrough, [PROVIDERS.md](./PROVIDERS.md) for configuring LLM providers, and [MCP.md](./MCP.md) for exposing the wiki over MCP.
 
 ## Example output
 
@@ -379,7 +389,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v1.1.2** — production-ready for personal use.
+**Current version: v1.2.0** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -395,6 +405,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 | 9.1 (v0.9.1) | `wiki reingest`, stabilize with retry-with-backoff, per-source diagnostic logs | ✅ Done |
 | 10 (v1.0.0) | Major overhaul of indexing; uses raw text from parser instead of raw file. Also exposed LLM settings to `config.yml` | ✅ Done |
 | 11 (v1.1.1) | Support multiple providers, local and cloud. Configurable providers per task. | ✅ Done |
+| 12 (v1.2.0) | MCP server — expose the wiki to other LLM sessions over Streamable HTTP (search, read, ask, status), read-only. | ✅ Done |
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)
