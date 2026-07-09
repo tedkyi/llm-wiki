@@ -388,52 +388,66 @@ def status() -> None:
 
 @app.command()
 def add(
-    path: Path = typer.Argument(
+    paths_arg: list[Path] = typer.Argument(
         ...,
-        help="File or folder to add. Can be anywhere on disk; it gets copied into raw/.",
+        metavar="PATH...",
+        help="One or more files or folders to add. Can be anywhere on disk; "
+        "referenced in place by default (use --copy to copy into raw/).",
     ),
     recursive: bool = typer.Option(
         False,
         "--recursive",
         "-r",
-        help="When PATH is a folder, walk it recursively.",
+        help="When a PATH is a folder, walk it recursively.",
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        help="Copy files into raw/ instead of referencing them in place.",
     ),
 ) -> None:
-    """Copy one or more files into raw/, parse them, and register in the DB.
+    """Register one or more sources: parse them and record them in the DB.
 
-    Accepts a single file or a folder. Skips unsupported types and deduplicates
-    by content hash. No LLM calls happen here — that's `wiki ingest` (Stage 3).
+    Accepts any mix of files and folders. By default each file is *referenced*
+    where it lives (no copy); pass --copy to copy it into raw/ instead. Skips
+    unsupported types and deduplicates by content hash. No LLM calls happen
+    here — that's `wiki ingest` (Stage 3).
     """
     paths = _resolve_root_or_die()
-    source = path.expanduser().resolve()
 
-    if not source.exists():
-        _err(f"Not found: {source}")
-        raise typer.Exit(code=1)
-
-    files_to_add = list(ingest_raw.iter_addable_files(source, recursive=recursive))
+    files_to_add: list[Path] = []
+    seen: set[Path] = set()
+    for arg in paths_arg:
+        source = Path(ingest_raw.strip_path_quotes(str(arg))).expanduser().resolve()
+        if not source.exists():
+            _err(f"Not found: {source}")
+            raise typer.Exit(code=1)
+        found = list(ingest_raw.iter_addable_files(source, recursive=recursive))
+        if not found:
+            if source.is_file():
+                _warn(f"Unsupported file type: {source.name}")
+            else:
+                _warn(f"No supported files found in {source}")
+                if not recursive:
+                    _hint("Use [bold]--recursive[/bold] (or [bold]-r[/bold]) to walk subdirectories.")
+        for f in found:
+            if f not in seen:
+                seen.add(f)
+                files_to_add.append(f)
 
     if not files_to_add:
-        if source.is_file():
-            _err(f"Unsupported file type: {source.suffix or '(no extension)'}")
-            _hint("Supported: .md, .txt, .pdf, .docx, .html, .htm")
-        else:
-            _warn(f"No supported files found in {source}")
-            if not recursive and source.is_dir():
-                _hint("Use [bold]--recursive[/bold] (or [bold]-r[/bold]) to walk subdirectories.")
+        _hint("Supported: .md, .txt, .pdf, .docx, .html, .htm")
         raise typer.Exit(code=1)
 
     console.print()
-    console.print(
-        f"Adding [bold]{len(files_to_add)}[/bold] file(s) to "
-        f"[dim]{paths.raw}[/dim]"
-    )
+    destination = f"[dim]{paths.raw}[/dim]" if copy else "[dim](referenced in place)[/dim]"
+    console.print(f"Adding [bold]{len(files_to_add)}[/bold] file(s) {destination}")
     console.print()
 
-    added = deduped = skipped = errored = 0
+    added = updated = deduped = skipped = errored = 0
 
     for file_path in files_to_add:
-        outcome = ingest_raw.add_file(paths, file_path)
+        outcome = ingest_raw.add_file(paths, file_path, copy=copy)
 
         if outcome.result == ingest_raw.AddResult.ADDED:
             added += 1
@@ -445,6 +459,13 @@ def add(
             console.print(
                 f"      [dim]{outcome.file_type} · {_format_bytes(outcome.bytes)} · "
                 f"{outcome.word_count:,} words[/dim]"
+            )
+        elif outcome.result == ingest_raw.AddResult.UPDATED:
+            updated += 1
+            console.print(
+                f"  [yellow]↻[/yellow] [bold]#{outcome.source_id}[/bold] "
+                f"[cyan]{outcome.relpath}[/cyan]  "
+                f"[yellow]{outcome.message}[/yellow]"
             )
         elif outcome.result == ingest_raw.AddResult.DEDUPED:
             deduped += 1
@@ -474,6 +495,8 @@ def add(
     summary_parts = []
     if added:
         summary_parts.append(f"[green]{added} added[/green]")
+    if updated:
+        summary_parts.append(f"[yellow]{updated} updated[/yellow]")
     if deduped:
         summary_parts.append(f"[yellow]{deduped} deduped[/yellow]")
     if skipped:
@@ -483,6 +506,8 @@ def add(
     console.print("  " + " · ".join(summary_parts))
     console.print()
 
+    if updated:
+        _hint("Re-ingest updated sources with [bold]wiki ingest[/bold]")
     if added:
         _hint("See everything with [bold]wiki sources list[/bold]")
 
@@ -611,7 +636,7 @@ def sources_show_cmd(
     # in the DB to keep it small. This is cheap (local file).
     from . import parsers
 
-    file_path = paths.root / row["relpath"]
+    file_path = ingest_raw.source_path(paths, row["relpath"])
     if not file_path.exists():
         _err(f"Source file missing from disk: {file_path}")
         raise typer.Exit(code=1)
@@ -678,7 +703,14 @@ def sources_rm_cmd(
         raise typer.Exit(code=1)
 
     if not yes:
-        action = "remove from tracking" if keep_file else "remove from tracking AND delete file"
+        file_path = ingest_raw.source_path(paths, row["relpath"])
+        will_delete = (not keep_file) and ingest_raw._is_inside_raw(file_path, paths.raw)
+        if will_delete:
+            action = "remove from tracking AND delete the copy in raw/"
+        elif not keep_file:
+            action = "remove from tracking (referenced file left in place)"
+        else:
+            action = "remove from tracking"
         confirm = typer.confirm(
             f"About to {action}: #{source_id} {row['relpath']}. Proceed?"
         )

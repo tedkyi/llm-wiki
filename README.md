@@ -44,6 +44,7 @@ Every ingest produces a cluster of `sources/`, `entities/`, and `concepts/` page
 - **Incremental ingest** — drop a file, run `wiki ingest`, get 8–15 cross-linked wiki pages
 - **Structured extraction** — Qwen3 identifies entities (people, organizations, places), concepts (models, techniques, architectures, ideas), and key takeaways per source, always framed around the problem being solved and its limitations
 - **Smart merging** — re-ingesting related sources updates existing entity/concept pages instead of overwriting them, preserving provenance
+- **Reference-based sources** — `wiki add` registers files *in place* by default (no copy into `raw/`), so large PDF libraries aren't duplicated on disk; opt into copies with `--copy`. Re-adding a file whose content changed updates it in place and re-queues it for ingest
 - **Pluggable LLM providers** — fully local on Ollama by default; also routes to vLLM, LM Studio, OpenAI, Anthropic, Gemini (via [LiteLLM](https://litellm.ai)), or the Claude Code / Codex CLIs — configurable **per pipeline task** (see [PROVIDERS.md](./PROVIDERS.md))
 - **Hybrid search** — BM25 full-text + vector embeddings + LLM reranking (all local, via [QMD](https://github.com/tobi/qmd))
 - **3-way query scope** — `Wiki` (thematic answers from LLM-compiled pages), `Raw` (exact lookups in original documents), or `Hybrid` (both)
@@ -192,65 +193,119 @@ Local by default: with the Ollama provider, no cloud services, no API keys, and 
 - **Python 3.11+**
 - **Node.js 18+** (for QMD)
 - **QMD** (`npm install -g @tobilu/qmd`) — the local search backend
-- **An LLM provider** — for the default local setup, **Ollama** with the `qwen3.6:35b` model pulled (large download, tens of GB). You can point tasks at a smaller local model or a cloud provider instead; see [PROVIDERS.md](./PROVIDERS.md).
+- **An LLM provider** — pick one:
+  - **Ollama** + the `qwen3.6:35b` model for the fully-local default (large download, tens of GB), **or**
+  - the **Claude Code CLI** (installed and logged in) — no local model, no API key, **or**
+  - any cloud/local backend via LiteLLM (OpenAI, Anthropic, Gemini, vLLM, LM Studio…). See [PROVIDERS.md](./PROVIDERS.md).
 - **Homebrew SQLite** on macOS (`brew install sqlite`)
-- **~30GB free disk space** for models and embeddings (much less if you use a cloud provider for inference and only run QMD's embed/rerank models locally)
-- **~24GB RAM** recommended for the default local LLM (32GB+ for comfort); far less if inference runs in the cloud
+- **~30GB free disk space** and **~24GB RAM** — *only for the fully-local Ollama setup* (to store and run the model). With Claude Code or a cloud provider you just need room for QMD's small embed/rerank models (~2GB) and far less RAM.
 - **Obsidian** (optional but strongly recommended for browsing)
 
 Developed and tested on macOS (Apple Silicon, M3 Pro 18GB). Also runs on Windows and should work on Linux.
 
 ## Installation
 
-```bash
-# Clone
-git clone https://github.com/YOUR-USERNAME/llm-wiki.git
-cd llm-wiki
+Install the tool and the search backend — needed for **every** setup:
 
+```bash
+git clone https://github.com/tedkyi/llm-wiki.git
+cd llm-wiki
+```
+
+```bash
 # Create a virtual environment (uv is faster than pip, either works)
 uv venv
 source .venv/bin/activate
 uv pip install -e .
+```
 
-# Pull the LLM (one-time, large download)
-ollama pull qwen3.6:35b
-
-# Install QMD (the search backend)
+```bash
+# Install QMD (the local search backend)
 npm install -g @tobilu/qmd
+```
 
+```bash
 # Verify
 wiki version
 wiki --help
 ```
 
-## Quick start
+Then pick how the pipeline talks to an LLM:
+
+### Option A — Fully local with Ollama (default)
+
+100% local — no API keys, nothing leaves your machine.
 
 ```bash
-# 1. Create a wiki in a folder of your choosing
+# One-time, large download (tens of GB)
+ollama pull qwen3.6:35b
+```
+
+`wiki init` already routes every task to a local Ollama profile, so there's nothing else to configure.
+
+### Option B — Use Claude Code as the LLM (no Ollama, no API key)
+
+Runs the reasoning on your existing **Claude Code** login — skipping the ~30 GB model download and the RAM to run it locally. QMD still runs its small embedding/rerank models locally for search.
+
+1. Install and sign in to the [`claude` CLI](https://claude.com/claude-code).
+2. After you scaffold a wiki with `wiki init` (see [Quick start](#quick-start)), point it at Claude Code — on the web UI **Settings** page, or by editing `.wiki/config.yml`:
+
+```yaml
+llm:
+  default_provider: claude-code
+  providers:
+    claude-code:
+      type: claude-code
+      model: claude-opus-4-8
+```
+
+Prefer a mix? Keep token-heavy ingest on a local model and route only `query_synthesis` to Claude Code. Full details in [PROVIDERS.md](./PROVIDERS.md).
+
+## Quick start
+
+**1. Create a wiki** in a folder of your choosing:
+
+```bash
 mkdir my-wiki && cd my-wiki
 wiki init
+```
 
-# 2. Drop some source documents in raw/, or use:
+**2. Add some sources** — referenced in place (add `--copy` to copy into `raw/`):
+
+```bash
 wiki add ~/Documents/papers --recursive
+```
 
-# 3. Run ingest (interactive by default — shows you entities/concepts
-#    before filing, with a y/n prompt per source)
+**3. Ingest them** — interactive by default (shows entities/concepts before filing, with a y/n prompt per source):
+
+```bash
 wiki ingest
+```
 
-# First query triggers QMD to download its embedding + reranker models
-# (~2GB, one-time). Subsequent queries are fast.
+> The first query triggers QMD to download its embedding + reranker models (~2 GB, one-time). Subsequent queries are fast.
 
-# 4. Ask questions
+**4. Ask questions:**
+
+```bash
 wiki query "what are the main themes across these documents?"
+```
 
-# 5. Save a good answer as a synthesis page
+**5. Save a good answer** as a synthesis page:
+
+```bash
 wiki query "compare X vs Y" --save-as x-vs-y-comparison
+```
 
-# 6. Health-check and auto-fix
+**6. Health-check and auto-fix:**
+
+```bash
 wiki lint --fix
+```
 
-# 7. Browse the vault in Obsidian
-open wiki/   # then "Open folder as vault"
+**7. Browse the vault in Obsidian** — then "Open folder as vault":
+
+```bash
+open wiki/
 ```
 
 ## Commands
@@ -258,7 +313,7 @@ open wiki/   # then "Open folder as vault"
 | Command | Purpose |
 |---|---|
 | `wiki init [path]` | Scaffold a new wiki project |
-| `wiki add <file-or-folder> [-r]` | Copy sources into `raw/` and register for ingest |
+| `wiki add <paths…> [-r] [--copy]` | Register one or more sources for ingest — referenced in place by default; `--copy` copies into `raw/` |
 | `wiki sources list` | List all tracked sources with status |
 | `wiki sources show <id>` | Show metadata + text preview for one source |
 | `wiki sources rm <id>` | Remove a source from tracking |
@@ -280,7 +335,12 @@ Run `wiki <command> --help` for full options on any command. See [USAGE.md](./US
 
 A real ingest against `notes.txt` (28 words about Qwen3):
 
+```bash
+wiki add notes.txt
+wiki ingest
 ```
+
+```text
 Source #1  raw/notes.txt
   parsing…
   extracting entities and concepts (thinking mode)…
@@ -316,9 +376,11 @@ That's **5 cross-linked pages from a 28-word input**, each with YAML frontmatter
 
 A real query against 11 ingested pages:
 
+```bash
+wiki query "how does multi-head attention differ from self-attention?"
 ```
-> wiki query "how does multi-head attention differ from self-attention?"
 
+```text
   searching wiki (BM25 + vector + rerank)…
   found 8 relevant page(s):
     1. 0.93 concepts/multi-head-attention.md      Multi-Head Attention
@@ -351,9 +413,11 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Lint example
 
+```bash
+wiki lint
 ```
-> wiki lint
 
+```text
 ╭─────────── Lint Report ────────────╮
 │ Health score: 57/100               │
 │ Pages checked: 12                  │
@@ -375,11 +439,21 @@ Every claim is cited. Every citation points to a page that actually exists.
       ✓ auto-fixable
 
   [... 20 more warnings ...]
+```
 
-> wiki lint --fix
+```bash
+wiki lint --fix
+```
+
+```text
 ✓ auto-fixed: 11
+```
 
-> wiki lint
+```bash
+wiki lint
+```
+
+```text
 ╭─────────── Lint Report ───────────╮
 │ Health score: 100/100             │
 │   0 errors · 0 warnings · 0 infos │
@@ -389,7 +463,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 
 ## Project status
 
-**Current version: v1.2.0** — production-ready for personal use.
+**Current version: v1.2.1** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -406,6 +480,7 @@ Every claim is cited. Every citation points to a page that actually exists.
 | 10 (v1.0.0) | Major overhaul of indexing; uses raw text from parser instead of raw file. Also exposed LLM settings to `config.yml` | ✅ Done |
 | 11 (v1.1.1) | Support multiple providers, local and cloud. Configurable providers per task. | ✅ Done |
 | 12 (v1.2.0) | MCP server — expose the wiki to other LLM sessions over Streamable HTTP (search, read, ask, status), read-only. | ✅ Done |
+| 13 (v1.2.1) | Reference sources by path instead of copying into `raw/` (opt-in `--copy`); multi-path `wiki add`; primary "add by path" web input; re-adding a changed file updates it in place and re-queues ingest. | ✅ Done |
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)
