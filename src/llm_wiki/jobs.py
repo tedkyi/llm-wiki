@@ -418,7 +418,9 @@ class JobManager:
         router = LLMRouter(llm_cfg)
         try:
             try:
-                router.ensure_ready()
+                router.ensure_ready(
+                    ("ingest_extract", "ingest_extract_retry", "ingest_draft")
+                )
             except LLMError as e:
                 _update_job(
                     self.paths,

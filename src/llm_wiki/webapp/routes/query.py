@@ -138,7 +138,9 @@ async def query_stream(
             return
         try:
             try:
-                router_obj.ensure_ready()
+                router_obj.ensure_ready(
+                    ("query_intent", "query_chitchat", "query_synthesis")
+                )
             except Exception as e:
                 event_q.put(("error", {"text": f"LLM provider not ready: {e}"}))
                 return

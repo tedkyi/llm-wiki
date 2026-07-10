@@ -30,7 +30,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass
-from typing import Generator
+from typing import Generator, Iterable
 
 import httpx
 
@@ -1081,10 +1081,19 @@ class LLMRouter:
     def thinking_default(self, task: str | None = None, fallback: bool = False) -> bool:
         return bool(self._profile(self.provider_for(task)).get("thinking", fallback))
 
-    def ensure_ready(self) -> None:
-        """Check each distinct provider this run may use."""
+    def ensure_ready(self, tasks: Iterable[str] | None = None) -> None:
+        """Check each distinct provider this run may use.
+
+        When `tasks` is given, only the providers those tasks resolve to are
+        probed — so a command never checks a backend it won't call (e.g. a
+        query run won't probe the Ollama server that only ingest is routed to).
+        When `tasks` is None, every configured task provider plus the default is
+        checked, preserving the original whole-config sweep.
+        """
         if self._override:
             names = {self._override}
+        elif tasks is not None:
+            names = {self.provider_for(t) for t in tasks}
         else:
             names = set(self._task_providers.values())
             if self._default:
