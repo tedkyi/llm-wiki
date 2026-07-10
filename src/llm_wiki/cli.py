@@ -172,7 +172,7 @@ def _build_router(
     console.print()
     console.print("[dim]Checking inference providers…[/dim]")
     try:
-        router.ensure_ready()
+        router.ensure_ready(tasks or None)
     except (OllamaNotRunning, ModelNotFound) as e:
         _err(str(e))
         if fail_hint:
