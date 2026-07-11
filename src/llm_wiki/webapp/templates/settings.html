@@ -281,8 +281,19 @@ async function testProvider(name, btn) {
     btn.disabled = true;
     out.textContent = 'Testing…';
     out.className = 'text-xs mt-2 text-[#9ca3af]';
+    // Probe the *current* (possibly unsaved) form values, not the saved config.
+    const body = new URLSearchParams();
+    const field = (n) => document.getElementsByName(n + '__' + name)[0];
+    const model = field('model'), endpoint = field('endpoint'),
+          keyenv = field('keyenv'), advanced = field('advanced'), iso = field('iso');
+    if (model)    body.set('model', model.value);
+    if (endpoint) body.set('endpoint', endpoint.value);
+    if (keyenv)   body.set('keyenv', keyenv.value);
+    if (advanced) body.set('advanced', advanced.value);
+    if (iso && iso.checked) body.set('iso', '1');
     try {
-        const res = await fetch('/settings/test/' + encodeURIComponent(name), { method: 'POST' });
+        const res = await fetch('/settings/test/' + encodeURIComponent(name),
+                                { method: 'POST', body });
         const data = await res.json();
         out.textContent = data.message;
         out.className = 'text-xs mt-2 ' + (data.ok ? 'text-[#7ee2a0]' : 'text-[#f0a0a0]');

@@ -42,6 +42,53 @@ def _slug_name(name: str) -> str:
     return _NAME_RE.sub("-", (name or "").strip().lower()).strip("-")
 
 
+def _apply_profile_fields(
+    profile: dict,
+    *,
+    model: str | None = None,
+    endpoint: str | None = None,
+    key_env: str | None = None,
+    advanced: str | None = None,
+    isolated: bool | None = None,
+) -> str | None:
+    """Overlay submitted form fields onto ``profile`` in place.
+
+    Shared by Save (persists the result) and Test (probes it without saving) so
+    the two can't drift apart. Each argument is ``None`` when the field wasn't
+    submitted. Returns an error message if the advanced JSON is invalid, else
+    ``None``.
+    """
+    if model is not None:
+        profile["model"] = model.strip()
+    if isolated is not None and profile.get("type") in cfg.CLI_PROVIDER_TYPES:
+        profile["isolated"] = isolated
+    if endpoint is not None:
+        field = "host" if profile.get("type") == "ollama-native" else "api_base"
+        endpoint = endpoint.strip()
+        if endpoint:
+            profile[field] = endpoint
+        else:
+            profile.pop(field, None)
+    if key_env is not None:
+        key_env = key_env.strip()
+        if key_env:
+            profile["api_key_env"] = key_env
+        else:
+            profile.pop("api_key_env", None)
+    if advanced is not None and advanced.strip():
+        try:
+            parsed = json.loads(advanced)
+            if not isinstance(parsed, dict):
+                raise ValueError("must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            return f"invalid advanced settings ({e})"
+        # Replace all non-dedicated keys with the edited set.
+        for key in [k for k in profile if k not in _DEDICATED_KEYS]:
+            del profile[key]
+        profile.update(parsed)
+    return None
+
+
 def _settings_context(paths: cfg.WikiPaths, **extra) -> dict:
     config = cfg.load_config(paths)
     llm = config.get("llm", {})
@@ -160,40 +207,17 @@ async def save_settings(request: Request) -> RedirectResponse:
     # Per-provider: model, endpoint, and advanced (sampling/thinking/tasks) JSON
     errors: list[str] = []
     for name, profile in providers.items():
-        model = form.get(f"model__{name}")
-        if model is not None:
-            profile["model"] = model.strip()
         # Isolation toggle for agent-CLI providers (checkbox: absent = off).
-        if profile.get("type") in cfg.CLI_PROVIDER_TYPES:
-            profile["isolated"] = f"iso__{name}" in form
-        endpoint = form.get(f"endpoint__{name}")
-        if endpoint is not None:
-            field = "host" if profile.get("type") == "ollama-native" else "api_base"
-            endpoint = endpoint.strip()
-            if endpoint:
-                profile[field] = endpoint
-            else:
-                profile.pop(field, None)
-        key_env = form.get(f"keyenv__{name}")
-        if key_env is not None:
-            key_env = key_env.strip()
-            if key_env:
-                profile["api_key_env"] = key_env
-            else:
-                profile.pop("api_key_env", None)
-        advanced = form.get(f"advanced__{name}")
-        if advanced is not None and advanced.strip():
-            try:
-                parsed = json.loads(advanced)
-                if not isinstance(parsed, dict):
-                    raise ValueError("must be a JSON object")
-            except (json.JSONDecodeError, ValueError) as e:
-                errors.append(f"{name}: invalid advanced settings ({e})")
-                continue
-            # Replace all non-dedicated keys with the edited set.
-            for key in [k for k in profile if k not in _DEDICATED_KEYS]:
-                del profile[key]
-            profile.update(parsed)
+        err = _apply_profile_fields(
+            profile,
+            model=form.get(f"model__{name}"),
+            endpoint=form.get(f"endpoint__{name}"),
+            key_env=form.get(f"keyenv__{name}"),
+            advanced=form.get(f"advanced__{name}"),
+            isolated=f"iso__{name}" in form,
+        )
+        if err:
+            errors.append(f"{name}: {err}")
 
     if errors:
         return RedirectResponse(
@@ -291,13 +315,31 @@ async def delete_key(handle: str = Form(...)) -> RedirectResponse:
 
 @router.post("/settings/test/{provider}")
 async def test_provider(request: Request, provider: str) -> JSONResponse:
-    """Check that a provider profile is reachable/authenticated."""
+    """Check that a provider profile is reachable/authenticated.
+
+    Probes the *current form values* (sent in the request body) overlaid on the
+    saved profile, so Test reflects what's on screen rather than the last-saved
+    config. Nothing is persisted — Test is a read-only probe.
+    """
     paths: cfg.WikiPaths = request.app.state.wiki_paths
     credentials.prime_environment()
     providers = cfg.load_config(paths).get("llm", {}).get("providers", {})
     if provider not in providers:
         return JSONResponse({"ok": False, "message": f"Unknown provider '{provider}'."})
-    client = make_client(providers[provider])
+    profile = dict(providers[provider])
+    form = await request.form()
+    is_cli = profile.get("type") in cfg.CLI_PROVIDER_TYPES
+    err = _apply_profile_fields(
+        profile,
+        model=form.get("model"),
+        endpoint=form.get("endpoint"),
+        key_env=form.get("keyenv"),
+        advanced=form.get("advanced"),
+        isolated=("iso" in form) if is_cli else None,
+    )
+    if err:
+        return JSONResponse({"ok": False, "message": err})
+    client = make_client(profile)
     try:
         # probe() does the most meaningful available check per provider type
         # (Ollama reachability, key presence, or a live agent-CLI auth round-trip).
