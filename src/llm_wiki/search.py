@@ -149,6 +149,8 @@ def _run_qmd(
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             input=stdin_text,
         )
@@ -187,7 +189,12 @@ def get_version() -> str | None:
         return None
     try:
         result = subprocess.run(
-            [_find_qmd(), "--version"], capture_output=True, text=True, timeout=5
+            [_find_qmd(), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
         )
         return result.stdout.strip() or None
     except Exception:
