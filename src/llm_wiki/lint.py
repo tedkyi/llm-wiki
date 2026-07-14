@@ -40,6 +40,7 @@ class CheckId(str, Enum):
     MALFORMED_WIKILINK = "malformed_wikilink"
     MISSING_CONCEPT_PAGE = "missing_concept_page"
     STALE_SOURCE_REF = "stale_source_ref"
+    STALE_SOURCE_FILE = "stale_source_file"
     NOISE_IN_SYNTHESIS = "noise_in_synthesis"
     CONTRADICTION = "contradiction"
 
@@ -511,6 +512,46 @@ def check_stale_source_refs(inv: PageInventory, paths: cfg.WikiPaths) -> list[Li
     return issues
 
 
+def check_stale_source_files(inv: PageInventory, paths: cfg.WikiPaths) -> list[LintIssue]:
+    """Flag sources/*.md pages whose `file_path:` entries reference a source
+    that no longer exists in the sources DB — e.g. removed via `wiki sources
+    rm` after its content was merged into this page.
+    """
+    from . import db
+
+    issues: list[LintIssue] = []
+    with db.connect(paths.state_db) as conn:
+        known_relpaths = {
+            r["relpath"] for r in conn.execute("SELECT relpath FROM sources").fetchall()
+        }
+
+    for relpath, parsed in inv.pages.items():
+        if not relpath.startswith("sources/"):
+            continue
+        file_path = parsed.frontmatter.get("file_path")
+        if isinstance(file_path, list):
+            entry_paths = [p for p in file_path if isinstance(p, str)]
+        elif isinstance(file_path, str):
+            entry_paths = [file_path]
+        else:
+            entry_paths = []
+
+        for entry_path in entry_paths:
+            if entry_path not in known_relpaths:
+                issues.append(
+                    LintIssue(
+                        check=CheckId.STALE_SOURCE_FILE,
+                        severity=Severity.WARNING,
+                        page=relpath,
+                        message=f"References file '{entry_path}' which no longer exists in the sources DB.",
+                        suggestion="The source was removed with `wiki sources rm`. Review whether this page's content is still accurate.",
+                        fixable=False,
+                        context={"target": entry_path},
+                    )
+                )
+    return issues
+
+
 def check_noise_in_synthesis_sources(inv: PageInventory) -> list[LintIssue]:
     """Flag synthesis pages that cite `log.md` or `index.md` as sources.
 
@@ -796,6 +837,7 @@ def run_lint(
         ("malformed_wikilinks", lambda: check_malformed_wikilinks(inv, paths)),
         ("missing_concepts", lambda: check_missing_concepts(inv)),
         ("stale_source_refs", lambda: check_stale_source_refs(inv, paths)),
+        ("stale_source_files", lambda: check_stale_source_files(inv, paths)),
         ("noise_in_synthesis", lambda: check_noise_in_synthesis_sources(inv)),
     ]
     for name, fn in fast_check_fns:

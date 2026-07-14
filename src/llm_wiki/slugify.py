@@ -54,6 +54,20 @@ def slugify(text: str, max_length: int = 60) -> str:
     return text or "untitled"
 
 
+_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?")
+
+
+def extract_arxiv_id(text: str) -> str | None:
+    """Pull a base arXiv ID (no version suffix) out of a filename or path.
+
+    'Foo Bar 2405.15071v2.pdf' -> '2405.15071'. Deterministic and independent
+    of any LLM extraction, so it's a reliable way to recognize that two
+    differently-named files are different versions of the same preprint.
+    """
+    m = _ARXIV_ID_RE.search(text)
+    return m.group(1) if m else None
+
+
 def canonical_name(text: str, kind: str = "any") -> str:
     """Normalize a name for alias matching — aggressive, lossy.
 

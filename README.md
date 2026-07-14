@@ -463,7 +463,7 @@ wiki lint
 
 ## Project status
 
-**Current version: v1.2.1** — production-ready for personal use.
+**Current version: v1.2.2** — production-ready for personal use.
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -484,7 +484,6 @@ wiki lint
 
 ### Possible future work
 - Hugging Face Spaces deployment (smaller model, API-compatible)
-- Cloud API, if preferred over local model
 - Better graph and community detection support
 - Dashboard showing live active-job count
 - Static HTML export for sharing the wiki

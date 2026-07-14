@@ -536,6 +536,16 @@ def mark_source_pending(
     return True, f"Marked #{source_id} ({row['relpath']}) as pending"
 
 
+def get_source_pages(paths: cfg.WikiPaths, source_id: int) -> list[str]:
+    """Wiki page paths (e.g. 'sources/foo.md') that this source contributed to."""
+    with db.connect(paths.state_db) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT wiki_path FROM source_pages WHERE source_id = ? ORDER BY wiki_path",
+            (source_id,),
+        ).fetchall()
+    return [r["wiki_path"] for r in rows]
+
+
 def remove_source(
     paths: cfg.WikiPaths, source_id: int, delete_file: bool = True
 ) -> tuple[bool, str]:

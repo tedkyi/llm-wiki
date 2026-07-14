@@ -353,7 +353,7 @@ Concept pages created/updated from this source:
 {concept_links}
 
 Write a complete markdown page with:
-1. YAML frontmatter in the --- delimited format described in your instructions: title, type: source, tags, created: {today}, updated: {today}, file_path, file_type
+1. YAML frontmatter in the --- delimited format described in your instructions: title, type: source, tags, created: {today}, updated: {today}, and file_path: a list with one entry [{file_path}]
 2. An H1 heading matching the title
 3. A 'Summary' section with the summary paragraph
 4. A 'Key Takeaways' section with the takeaways as bullets
@@ -362,6 +362,121 @@ Write a complete markdown page with:
 
 Return ONLY the markdown content — no preamble, no code fences.
 """
+
+
+MERGE_SOURCE_PAGE_TEMPLATE = """Update the following existing wiki source page with information
+from {file_relation}.
+
+---EXISTING PAGE---
+{existing_content}
+---END EXISTING PAGE---
+
+---{file_label}---
+File path: {file_path}
+File type: {file_type}
+Ingested: {today}
+
+Summary: {summary}
+
+Key takeaways:
+{key_takeaways}
+
+Entity pages created/updated from this file:
+{entity_links}
+
+Concept pages created/updated from this file:
+{concept_links}
+---END {file_label}---
+
+{merge_instructions}
+
+Return ONLY the complete updated markdown page — no preamble, no code fences.
+"""
+
+SAME_FILE_INSTRUCTIONS = """Update the page by:
+1. Replacing the Summary and Key Takeaways with the refreshed versions above — this is a
+   newer extraction of the SAME file, not a different document, so do not keep stale
+   duplicates of the old summary/takeaways alongside the new ones.
+2. Leaving the 'file_path:' frontmatter list unchanged — this path is already in it.
+3. Merging the Related Pages lists (Entities, Concepts) — union of both, no duplicates.
+4. Updating 'updated:' in frontmatter to {today}.
+5. Keeping any existing [[wikilinks]] intact. Do NOT add new [[wikilinks]] beyond those
+   already present or listed above — adding a wikilink implies that page exists, and you
+   cannot verify that."""
+
+NEW_FILE_INSTRUCTIONS = """Update the page by:
+1. Preserving the existing Summary and Key Takeaways — only add new takeaways that are
+   genuinely not already covered; do not duplicate.
+2. If the new file is a later version (e.g. a higher preprint version number) and clearly
+   supersedes the old one, note that briefly rather than deleting the old summary outright.
+3. Adding this file's path as a new entry in the 'file_path:' frontmatter list — keep the
+   existing entry/entries, do not overwrite them.
+4. Merging the Related Pages lists (Entities, Concepts) — union of both, no duplicates.
+5. Updating 'updated:' in frontmatter to {today}.
+6. Keeping any existing [[wikilinks]] intact. Do NOT add new [[wikilinks]] beyond those
+   already present or listed above — adding a wikilink implies that page exists, and you
+   cannot verify that."""
+
+
+def build_merge_source_page_messages(
+    existing_content: str,
+    file_path: str,
+    file_type: str,
+    summary: str,
+    key_takeaways: list[str],
+    entity_slugs: list[str],
+    concept_slugs: list[str],
+    today: str,
+    is_same_file: bool,
+) -> list[ChatMessage]:
+    """Pass 3b — merge a re-ingested or newly-discovered file into an existing
+    sources/<slug>.md page.
+
+    `is_same_file` distinguishes two cases that share the same merge semantics
+    for the page body but differ in how the 'file_path:' list is updated:
+      - True:  this source_id/path was already ingested into this page before
+               (re-ingest of a modified document) — refresh in place.
+      - False: a different file (different source_id/path) slugified to the
+               same title (e.g. another preprint version, or a duplicate copy)
+               — append as an additional file.
+    """
+    takeaways_str = "\n".join(f"- {t}" for t in key_takeaways)
+    entity_links = (
+        "\n".join(f"- [[entities/{s}]]" for s in entity_slugs)
+        if entity_slugs
+        else "  (none)"
+    )
+    concept_links = (
+        "\n".join(f"- [[concepts/{s}]]" for s in concept_slugs)
+        if concept_slugs
+        else "  (none)"
+    )
+    if is_same_file:
+        file_relation = "a re-ingest of the same file (content changed)"
+        file_label = "REFRESHED SOURCE FILE"
+        merge_instructions = SAME_FILE_INSTRUCTIONS.format(today=today)
+    else:
+        file_relation = "another file recognized as the same document (e.g. a different version or copy)"
+        file_label = "NEW SOURCE FILE"
+        merge_instructions = NEW_FILE_INSTRUCTIONS.format(today=today)
+
+    user_content = MERGE_SOURCE_PAGE_TEMPLATE.format(
+        file_relation=file_relation,
+        file_label=file_label,
+        existing_content=existing_content,
+        file_path=file_path,
+        file_type=file_type,
+        summary=summary,
+        key_takeaways=takeaways_str,
+        entity_links=entity_links,
+        concept_links=concept_links,
+        today=today,
+        merge_instructions=merge_instructions,
+    )
+    return [
+        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="user", content=user_content),
+    ]
 
 
 def build_source_page_messages(
