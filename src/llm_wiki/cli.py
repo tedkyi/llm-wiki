@@ -711,6 +711,14 @@ def sources_rm_cmd(
             action = "remove from tracking (referenced file left in place)"
         else:
             action = "remove from tracking"
+        affected_pages = ingest_raw.get_source_pages(paths, source_id)
+        if affected_pages:
+            console.print(
+                f"[yellow]This source contributed to {len(affected_pages)} wiki "
+                f"page(s); their content will NOT be removed or reverted:[/yellow]"
+            )
+            for p in affected_pages:
+                console.print(f"  [dim]- {p}[/dim]")
         confirm = typer.confirm(
             f"About to {action}: #{source_id} {row['relpath']}. Proceed?"
         )

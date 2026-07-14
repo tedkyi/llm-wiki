@@ -622,4 +622,4 @@ When reporting bugs, please include:
 
 ---
 
-*Last updated: LLM-Wiki v1.2.1*
+*Last updated: LLM-Wiki v1.2.2*

@@ -408,6 +408,59 @@ def _record_source_pages(
             )
 
 
+def _resolve_source_slug(
+    paths: cfg.WikiPaths,
+    source_id: int,
+    source_row: dict,
+    extraction: Extraction,
+) -> str:
+    """Pick the sources/<slug>.md this ingest should target.
+
+    Priority, most to least reliable:
+      1. This exact source_id has been ingested before — reuse its known page.
+         (Its slug can't be trusted to survive a fresh LLM extraction call to
+         call — see the docstring note at the call site.)
+      2. This source's filename carries an arXiv ID that matches an existing
+         source page's file — deterministic, no LLM involved, catches
+         different preprint versions of the same paper.
+      3. Otherwise, this is genuinely new: slugify this run's extracted title.
+    """
+    with db.connect(paths.state_db) as conn:
+        prior_page = conn.execute(
+            """
+            SELECT wiki_path FROM source_pages
+             WHERE source_id = ? AND wiki_path LIKE 'sources/%.md'
+             ORDER BY at DESC LIMIT 1
+            """,
+            (source_id,),
+        ).fetchone()
+    if prior_page is not None:
+        return prior_page["wiki_path"].removeprefix("sources/").removesuffix(".md")
+
+    arxiv_id = slugify.extract_arxiv_id(source_row["relpath"])
+    if arxiv_id:
+        with db.connect(paths.state_db) as conn:
+            rows = conn.execute(
+                """
+                SELECT sp.source_id, sp.wiki_path, sp.at, s.relpath
+                  FROM source_pages sp
+                  JOIN sources s ON s.id = sp.source_id
+                 WHERE sp.wiki_path LIKE 'sources/%.md' AND sp.source_id != ?
+                """,
+                (source_id,),
+            ).fetchall()
+        latest_by_source: dict[int, object] = {}
+        for r in rows:
+            prev = latest_by_source.get(r["source_id"])
+            if prev is None or r["at"] > prev["at"]:
+                latest_by_source[r["source_id"]] = r
+        for r in latest_by_source.values():
+            if slugify.extract_arxiv_id(r["relpath"]) == arxiv_id:
+                return r["wiki_path"].removeprefix("sources/").removesuffix(".md")
+
+    return slugify.slugify(extraction.source_slug or extraction.title)
+
+
 def _auto_discover_pending(paths: cfg.WikiPaths) -> int:
     """Scan raw/ for files not yet tracked in the DB and register them.
 
@@ -681,8 +734,10 @@ def ingest_source(
             callbacks.on_error(result.error)
             return result
 
-    # Sanitize the source slug
-    source_slug = slugify.slugify(extraction.source_slug or extraction.title)
+    # Sanitize the source slug. The LLM-generated slug/title is not deterministic
+    # across runs (paraphrasing varies call to call), so trust it only when
+    # nothing more reliable is available — see _resolve_source_slug.
+    source_slug = _resolve_source_slug(paths, source_id, source_row, extraction)
     extraction.source_slug = source_slug
 
     callbacks.on_extracted(extraction)
@@ -906,26 +961,52 @@ def ingest_source(
                 callbacks.on_error(result.error)
                 return result
 
-        # 6d. Pass 3 — source summary page
-        callbacks.on_drafting_page("source", source_slug, "created")
+        # 6d. Pass 3 — source summary page (or MERGE if a page already exists at this slug —
+        # either a re-ingest of this same file, or a different file recognized as the same
+        # document, e.g. another preprint version)
         source_final = paths.wiki / "sources" / f"{source_slug}.md"
         source_staged = staging / f"sources__{source_slug}.md"
+        existing_source_page = page_writer.read_page(source_final)
+        source_operation = "updated" if existing_source_page is not None else "created"
+        callbacks.on_drafting_page("source", source_slug, source_operation)
 
         try:
-            messages = prompts.build_source_page_messages(
-                source_title=parsed.title,
-                source_slug=source_slug,
-                file_path=source_row["relpath"],
-                file_type=parsed.file_type,
-                summary=extraction.summary,
-                key_takeaways=extraction.key_takeaways,
-                tags=extraction.tags,
-                entity_slugs=[s for _, s, _ in entity_plans],
-                concept_slugs=[s for _, s, _ in concept_plans],
-                today=today,
-            )
+            if existing_source_page is not None:
+                existing_paths = existing_source_page.frontmatter.get("file_path")
+                if isinstance(existing_paths, list):
+                    known_paths = set(existing_paths)
+                elif isinstance(existing_paths, str):
+                    known_paths = {existing_paths}
+                else:
+                    known_paths = set()
+                is_same_file = source_row["relpath"] in known_paths
 
-            logger.section(f"PASS 3 — SOURCE PAGE {source_slug}")
+                messages = prompts.build_merge_source_page_messages(
+                    existing_content=existing_source_page.to_markdown(),
+                    file_path=source_row["relpath"],
+                    file_type=parsed.file_type,
+                    summary=extraction.summary,
+                    key_takeaways=extraction.key_takeaways,
+                    entity_slugs=[s for _, s, _ in entity_plans],
+                    concept_slugs=[s for _, s, _ in concept_plans],
+                    today=today,
+                    is_same_file=is_same_file,
+                )
+            else:
+                messages = prompts.build_source_page_messages(
+                    source_title=parsed.title,
+                    source_slug=source_slug,
+                    file_path=source_row["relpath"],
+                    file_type=parsed.file_type,
+                    summary=extraction.summary,
+                    key_takeaways=extraction.key_takeaways,
+                    tags=extraction.tags,
+                    entity_slugs=[s for _, s, _ in entity_plans],
+                    concept_slugs=[s for _, s, _ in concept_plans],
+                    today=today,
+                )
+
+            logger.section(f"PASS 3 — SOURCE PAGE {source_slug} ({source_operation})")
             logger.info("Sleeping 1s before LLM call…")
             time.sleep(1)
             logger.info("LLM call start: thinking=False, temperature=0.3")
@@ -936,20 +1017,33 @@ def ingest_source(
             content = page_writer.strip_llm_noise(full)
             parsed_page = page_writer.parse_page(content)
             if not parsed_page.frontmatter:
-                parsed_page.frontmatter = {
-                    "title": parsed.title,
-                    "type": "source",
-                    "tags": extraction.tags,
-                    "created": today,
-                    "updated": today,
-                    "file_path": source_row["relpath"],
-                    "file_type": parsed.file_type,
-                }
+                if existing_source_page is not None:
+                    frontmatter = dict(existing_source_page.frontmatter)
+                    paths = frontmatter.get("file_path")
+                    if isinstance(paths, list):
+                        paths = list(paths)
+                    elif isinstance(paths, str):
+                        paths = [paths]
+                    else:
+                        paths = []
+                    if source_row["relpath"] not in paths:
+                        paths.append(source_row["relpath"])
+                    frontmatter["file_path"] = paths
+                    frontmatter["updated"] = today
+                    parsed_page.frontmatter = frontmatter
+                else:
+                    parsed_page.frontmatter = {
+                        "title": parsed.title,
+                        "type": "source",
+                        "tags": extraction.tags,
+                        "created": today,
+                        "updated": today,
+                        "file_path": [source_row["relpath"]],
+                    }
                 parsed_page.body = content
             content = parsed_page.to_markdown()
 
             source_staged.write_text(content, encoding="utf-8")
-            source_operation = "updated" if source_final.exists() else "created"
             change = PageChange(
                 slug=source_slug,
                 path=f"sources/{source_slug}.md",
