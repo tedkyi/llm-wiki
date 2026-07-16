@@ -38,11 +38,16 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["llm_wiki"]
+branch = true
 
 [project.scripts]
 wiki = "llm_wiki.cli:app"
