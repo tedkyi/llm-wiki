@@ -213,6 +213,207 @@ def test_present_source_ref_not_stale(paths: cfg.WikiPaths) -> None:
 
 
 # ---------------------------------------------------------------------------
+# check_duplicate_header_blocks
+# ---------------------------------------------------------------------------
+
+
+# A duplicate frontmatter block fenced by tripled hyphens, ahead of the H1.
+_DUP_HYPHENS = (
+    "---\n"
+    'title: "Dup"\n'
+    "type: source\n"
+    "---\n"
+    "\n"
+    "# Real Title\n"
+    "\n"
+    "## Summary\n"
+    "body\n"
+)
+
+# Same artifact but fenced with tripled backticks (a common variant).
+_DUP_BACKTICKS = (
+    "```yaml\n"
+    'title: "Dup"\n'
+    "```\n"
+    "\n"
+    "# Real Title\n"
+    "\n"
+    "body\n"
+)
+
+
+def test_duplicate_header_block_hyphen_fence_flagged(paths: cfg.WikiPaths) -> None:
+    _write(paths, "sources/a.md", _DUP_HYPHENS, title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    dup = [i for i in issues if i.page == "sources/a.md"]
+    assert dup and dup[0].check == lint.CheckId.DUPLICATE_HEADER_BLOCK
+    assert dup[0].fixable is True
+
+
+def test_duplicate_header_block_backtick_fence_flagged(paths: cfg.WikiPaths) -> None:
+    _write(paths, "sources/b.md", _DUP_BACKTICKS, title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    assert any(i.page == "sources/b.md" for i in issues)
+
+
+def test_clean_page_no_duplicate_header(paths: cfg.WikiPaths) -> None:
+    _write(paths, "sources/c.md", "# Real Title\n\n## Summary\nbody\n",
+           title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    assert not any(i.page == "sources/c.md" for i in issues)
+
+
+def test_pre_h1_content_without_fence_is_flagged(paths: cfg.WikiPaths) -> None:
+    # A well-formed body starts at its H1, so ANY non-whitespace before it is
+    # junk — fenced or not. (Widened from the original fence-only detection.)
+    _write(paths, "sources/d.md", "some stray text\n\n# Real Title\n\nbody\n",
+           title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    assert any(i.page == "sources/d.md" for i in issues)
+
+
+def test_page_without_h1_not_flagged(paths: cfg.WikiPaths) -> None:
+    # No H1 to anchor on — we must not strip the whole body.
+    _write(paths, "sources/e.md", "---\ntitle: dup\n---\n\nno heading here\n",
+           title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    assert not any(i.page == "sources/e.md" for i in issues)
+
+
+def test_stray_text_before_h1_flagged(paths: cfg.WikiPaths) -> None:
+    # A non-fence fragment before the H1 (e.g. a truncated word) is still junk.
+    _write(paths, "sources/f.md", "remov\n# Real Title\n\nbody\n",
+           title="Real", type="source")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_duplicate_header_blocks(inv)
+    stray = [i for i in issues if i.page == "sources/f.md"]
+    assert stray and stray[0].fixable is True
+    assert "stray text" in stray[0].message
+
+
+def test_apply_fix_strips_duplicate_header_block() -> None:
+    parsed = page_writer.ParsedPage(
+        frontmatter={},
+        body='---\ntitle: "Dup"\n---\n\n# Real Title\n\nbody\n',
+    )
+    fix = lint.LintIssue(
+        check=lint.CheckId.DUPLICATE_HEADER_BLOCK,
+        severity=lint.Severity.WARNING,
+        page="sources/a.md",
+        message="",
+        fixable=True,
+        context={"location": "body", "strip_before_h1": True},
+    )
+    changed = lint._apply_fixes_to_page(parsed, [fix])
+    assert changed is True
+    assert parsed.body.lstrip().startswith("# Real Title")
+    assert "Dup" not in parsed.body
+
+
+# ---------------------------------------------------------------------------
+# check_llm_artifact_body
+# ---------------------------------------------------------------------------
+
+
+def test_llm_refusal_body_flagged_not_fixable(paths: cfg.WikiPaths) -> None:
+    # No H1, body is a refusal message (the entities/zhang.md pattern).
+    _write(paths, "entities/z.md",
+           "The write requires permission — please approve it.\n",
+           title="Z", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_llm_artifact_body(inv)
+    hit = [i for i in issues if i.page == "entities/z.md"]
+    assert hit and hit[0].check == lint.CheckId.LLM_ARTIFACT_BODY
+    assert hit[0].fixable is False
+
+
+def test_llm_meta_commentary_before_h1_flagged(paths: cfg.WikiPaths) -> None:
+    # Assistant chatter ahead of the title (the entities/deepmind.md pattern).
+    _write(paths, "entities/d.md",
+           "I'll just output the updated page directly.\n\n# Real Title\n\nbody\n",
+           title="D", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_llm_artifact_body(inv)
+    assert any(i.page == "entities/d.md" for i in issues)
+
+
+def test_llm_artifact_still_flagged_after_h1_inserted(paths: cfg.WikiPaths) -> None:
+    # After a missing-H1 fix inserts a title, the refusal text sits just below
+    # it — the check must still see it (so --fix doesn't mask the problem).
+    _write(paths, "entities/z.md",
+           "# Z\n\nThe write requires permission — please approve it.\n",
+           title="Z", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_llm_artifact_body(inv)
+    assert any(i.page == "entities/z.md" for i in issues)
+
+
+def test_prose_first_page_not_llm_artifact(paths: cfg.WikiPaths) -> None:
+    # A legitimate prose-first page (no H1) must NOT trip the artifact check.
+    _write(paths, "entities/g.md",
+           "Google is a technology company that developed the LaMDA models.\n",
+           title="Google", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_llm_artifact_body(inv)
+    assert not any(i.page == "entities/g.md" for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# check_missing_h1
+# ---------------------------------------------------------------------------
+
+
+def test_missing_h1_flagged_and_fixable(paths: cfg.WikiPaths) -> None:
+    _write(paths, "entities/g.md", "Google is a technology company.\n",
+           title="Google", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_missing_h1(inv)
+    hit = [i for i in issues if i.page == "entities/g.md"]
+    assert hit and hit[0].fixable is True
+    assert hit[0].context["insert_h1_title"] == "Google"
+
+
+def test_missing_h1_without_title_not_fixable(paths: cfg.WikiPaths) -> None:
+    dest = paths.wiki / "entities" / "notitle.md"
+    dest.write_text("just prose, no frontmatter, no heading\n", encoding="utf-8")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_missing_h1(inv)
+    hit = [i for i in issues if i.page == "entities/notitle.md"]
+    assert hit and hit[0].fixable is False
+
+
+def test_page_with_h1_not_missing(paths: cfg.WikiPaths) -> None:
+    _write(paths, "entities/g.md", "# Google\n\nGoogle is a company.\n",
+           title="Google", type="entity")
+    inv = lint._build_inventory(paths)
+    issues = lint.check_missing_h1(inv)
+    assert not any(i.page == "entities/g.md" for i in issues)
+
+
+def test_apply_fix_inserts_h1_from_title() -> None:
+    parsed = page_writer.ParsedPage(
+        frontmatter={"title": "Google"}, body="Google is a company.\n"
+    )
+    fix = lint.LintIssue(
+        check=lint.CheckId.MISSING_H1,
+        severity=lint.Severity.WARNING,
+        page="entities/g.md",
+        message="",
+        fixable=True,
+        context={"insert_h1_title": "Google"},
+    )
+    changed = lint._apply_fixes_to_page(parsed, [fix])
+    assert changed is True
+    assert parsed.body.startswith("# Google\n")
+    assert "Google is a company." in parsed.body
+
+
+# ---------------------------------------------------------------------------
 # _apply_fixes_to_page
 # ---------------------------------------------------------------------------
 

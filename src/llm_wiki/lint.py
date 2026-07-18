@@ -42,6 +42,9 @@ class CheckId(str, Enum):
     STALE_SOURCE_REF = "stale_source_ref"
     STALE_SOURCE_FILE = "stale_source_file"
     NOISE_IN_SYNTHESIS = "noise_in_synthesis"
+    DUPLICATE_HEADER_BLOCK = "duplicate_header_block"
+    LLM_ARTIFACT_BODY = "llm_artifact_body"
+    MISSING_H1 = "missing_h1"
     CONTRADICTION = "contradiction"
 
 
@@ -592,6 +595,192 @@ def check_noise_in_synthesis_sources(inv: PageInventory) -> list[LintIssue]:
 
 
 # ---------------------------------------------------------------------------
+# Duplicate header / pre-title junk
+# ---------------------------------------------------------------------------
+
+
+# A "tripled fence" line: three-or-more hyphens or backticks, optionally
+# followed by an info string (e.g. ```yaml). These delimit the duplicate
+# frontmatter/preamble blocks the ingest LLM sometimes emits before the H1
+# title. Such characters don't otherwise appear ahead of a page's title.
+_FENCE_RE = re.compile(r"^\s*(?:-{3,}|`{3,})\s*\S*\s*$")
+# A level-one heading — the page title in a well-formed body.
+_H1_RE = re.compile(r"^#\s+\S")
+
+
+def _split_pre_h1(body: str) -> tuple[list[str], int | None]:
+    """Split a page body at its first H1 heading.
+
+    Returns (preamble_lines, h1_index) where preamble_lines are the body lines
+    before the first `# Heading` and h1_index is that line's index (or None if
+    the body has no H1 at all).
+    """
+    lines = body.splitlines()
+    for idx, line in enumerate(lines):
+        if _H1_RE.match(line):
+            return lines[:idx], idx
+    return lines, None
+
+
+def check_duplicate_header_blocks(inv: PageInventory) -> list[LintIssue]:
+    """Flag any junk emitted before a page's H1 title.
+
+    A well-formed body begins directly with its `# Title` H1 (the real
+    frontmatter having already been split off by `parse_page`). The ingest LLM
+    sometimes emits content ahead of the title:
+
+    - Most commonly a second, duplicate frontmatter block fenced by tripled
+      hyphens (`---`) and/or tripled backticks (```) in various combinations.
+    - Occasionally a stray fragment (e.g. a truncated word like `remov`).
+
+    Since a well-formed body has *nothing* before its H1, we flag any
+    non-whitespace in that pre-title region — fenced or not. `_FENCE_RE` is used
+    only to describe the issue more precisely in the message.
+
+    The fix strips everything before the first H1 heading.
+    """
+    issues: list[LintIssue] = []
+    for relpath, parsed in inv.pages.items():
+        preamble_lines, h1_index = _split_pre_h1(parsed.body)
+        if h1_index is None or h1_index == 0:
+            # No H1 (can't safely locate the title — see check_missing_h1), or
+            # the body already starts with it — nothing to strip.
+            continue
+        if not any(line.strip() for line in preamble_lines):
+            continue
+        fenced = any(_FENCE_RE.match(line) for line in preamble_lines)
+        detail = (
+            "duplicate header/frontmatter block"
+            if fenced
+            else "stray text"
+        )
+        issues.append(
+            LintIssue(
+                check=CheckId.DUPLICATE_HEADER_BLOCK,
+                severity=Severity.WARNING,
+                page=relpath,
+                message=(
+                    f"Content before the H1 title ({detail} emitted during ingest)."
+                ),
+                suggestion="Run `wiki lint --fix` to strip everything before the H1 title.",
+                fixable=True,
+                context={"location": "body", "strip_before_h1": True},
+            )
+        )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# LLM meta-commentary / refusal text in a page body
+# ---------------------------------------------------------------------------
+
+
+# Openers that only an assistant would write — a page body should never start
+# with these. Matched against the lower-cased, stripped candidate line.
+_ARTIFACT_LINE_STARTS = (
+    "i'll ", "i will ", "i cannot", "i can't", "i've ", "i have ",
+    "sure,", "sure!", "certainly", "here is the", "here's the",
+    "as an ai", "i apologize", "okay,", "of course",
+)
+# Distinctive refusal / hand-off phrases that betray a chat reply even mid-line.
+_ARTIFACT_PHRASES = (
+    "requires permission", "please approve", "let me know if you'd like",
+    "delivered differently", "output the updated page", "writing to a file",
+)
+
+
+def _looks_like_llm_artifact(line: str) -> bool:
+    """True if a line reads as assistant chatter rather than page content."""
+    s = line.strip().lower()
+    if not s:
+        return False
+    if any(s.startswith(p) for p in _ARTIFACT_LINE_STARTS):
+        return True
+    return any(p in s for p in _ARTIFACT_PHRASES)
+
+
+def check_llm_artifact_body(inv: PageInventory) -> list[LintIssue]:
+    """Flag pages whose body opens with LLM meta-commentary or a refusal.
+
+    The ingest LLM occasionally emits a chat reply instead of (or ahead of) the
+    page — e.g. "I'll just output the updated page directly..." or "The write
+    requires permission — please approve it...". Unlike the pre-title junk that
+    `check_duplicate_header_blocks` handles, this text can't be mechanically
+    trimmed: the page usually needs re-ingesting. So this is report-only.
+
+    We look only at the first couple of content lines (the pre-H1 preamble, plus
+    the first line just after an H1 — an inserted title can push artifact text
+    right below it). That keeps legitimate prose deeper in a page from tripping
+    the check.
+    """
+    issues: list[LintIssue] = []
+    for relpath, parsed in inv.pages.items():
+        preamble_lines, h1_index = _split_pre_h1(parsed.body)
+        candidates = [l for l in preamble_lines if l.strip()][:2]
+        if h1_index is not None:
+            after = parsed.body.splitlines()[h1_index + 1 :]
+            candidates += [l for l in after if l.strip()][:1]
+
+        hit = next((l for l in candidates if _looks_like_llm_artifact(l)), None)
+        if hit is None:
+            continue
+        issues.append(
+            LintIssue(
+                check=CheckId.LLM_ARTIFACT_BODY,
+                severity=Severity.WARNING,
+                page=relpath,
+                message=f"Body reads as an LLM reply, not page content: {hit.strip()[:80]!r}",
+                suggestion=(
+                    "The model emitted a chat reply instead of page content — "
+                    "re-ingest this source. Not auto-fixable."
+                ),
+                fixable=False,
+                context={"artifact_line": hit.strip()},
+            )
+        )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Missing H1 title heading
+# ---------------------------------------------------------------------------
+
+
+def check_missing_h1(inv: PageInventory) -> list[LintIssue]:
+    """Flag pages whose body has no `# Title` H1 heading.
+
+    Every well-formed page opens its body with a single H1 matching the
+    frontmatter title. Some pages (often older ones) start straight into prose
+    with the title living only in frontmatter. The fix inserts `# <title>` at
+    the top of the body, derived from frontmatter — so it's only auto-fixable
+    when a frontmatter title exists.
+    """
+    issues: list[LintIssue] = []
+    for relpath, parsed in inv.pages.items():
+        _preamble, h1_index = _split_pre_h1(parsed.body)
+        if h1_index is not None:
+            continue
+        title = parsed.frontmatter.get("title")
+        has_title = isinstance(title, str) and bool(title.strip())
+        issues.append(
+            LintIssue(
+                check=CheckId.MISSING_H1,
+                severity=Severity.WARNING,
+                page=relpath,
+                message="Page body has no H1 title heading.",
+                suggestion=(
+                    "Run `wiki lint --fix` to insert '# <title>' from frontmatter."
+                    if has_title
+                    else "Add a '# Title' heading — no frontmatter title to derive one from."
+                ),
+                fixable=has_title,
+                context={"insert_h1_title": title.strip()} if has_title else {},
+            )
+        )
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Deep check — LLM-powered contradiction detection (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -735,6 +924,21 @@ def _apply_fixes_to_page(parsed: page_writer.ParsedPage, fixes: list[LintIssue])
                     parsed.frontmatter[field] = new_values
                     changed = True
 
+        elif issue.check == CheckId.DUPLICATE_HEADER_BLOCK:
+            if ctx.get("strip_before_h1"):
+                _preamble, h1_index = _split_pre_h1(body)
+                if h1_index is not None and h1_index > 0:
+                    body = "\n".join(body.splitlines()[h1_index:])
+                    changed = True
+
+        elif issue.check == CheckId.MISSING_H1:
+            title = ctx.get("insert_h1_title", "")
+            # Only insert when there is still no H1 — keeps the fix idempotent.
+            if title and _split_pre_h1(body)[1] is None:
+                stripped = body.lstrip("\n")
+                body = f"# {title}\n\n{stripped}" if stripped else f"# {title}\n"
+                changed = True
+
         elif issue.check == CheckId.NOISE_IN_SYNTHESIS:
             field = ctx.get("field", "sources")
             remove_value = ctx.get("remove_value", "")
@@ -839,6 +1043,9 @@ def run_lint(
         ("stale_source_refs", lambda: check_stale_source_refs(inv, paths)),
         ("stale_source_files", lambda: check_stale_source_files(inv, paths)),
         ("noise_in_synthesis", lambda: check_noise_in_synthesis_sources(inv)),
+        ("duplicate_header_blocks", lambda: check_duplicate_header_blocks(inv)),
+        ("llm_artifact_body", lambda: check_llm_artifact_body(inv)),
+        ("missing_h1", lambda: check_missing_h1(inv)),
     ]
     for name, fn in fast_check_fns:
         report.issues.extend(fn())
