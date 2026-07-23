@@ -46,6 +46,25 @@ class ParsedPage:
         return f"---\n{fm_yaml}\n---\n\n{self.body.strip()}\n"
 
 
+def _load_frontmatter_yaml(fm_text: str) -> dict[str, Any]:
+    """Parse a frontmatter YAML block into a dict, tolerating one common failure.
+
+    An LLM often writes a Windows path in a *double-quoted* scalar, e.g.
+    `file_path: ["D:\\Data\\paper.pdf"]`. YAML treats `\\D`, `\\p`, … as escape
+    sequences, they're invalid, and `safe_load` raises — which previously made
+    the whole page look frontmatter-less and produced duplicate-header pages. We
+    retry once with backslashes doubled so such paths survive. On any other
+    failure we return an empty dict, as before.
+    """
+    for candidate in (fm_text, fm_text.replace("\\", "\\\\")):
+        try:
+            data = yaml.safe_load(candidate)
+        except yaml.YAMLError:
+            continue
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
 def parse_page(content: str) -> ParsedPage:
     """Split a markdown string into frontmatter + body."""
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
@@ -53,13 +72,7 @@ def parse_page(content: str) -> ParsedPage:
         return ParsedPage(frontmatter={}, body=content)
     fm_text = match.group(1)
     body = match.group(2)
-    try:
-        fm = yaml.safe_load(fm_text) or {}
-        if not isinstance(fm, dict):
-            fm = {}
-    except yaml.YAMLError:
-        fm = {}
-    return ParsedPage(frontmatter=fm, body=body)
+    return ParsedPage(frontmatter=_load_frontmatter_yaml(fm_text), body=body)
 
 
 def read_page(path: Path) -> ParsedPage | None:

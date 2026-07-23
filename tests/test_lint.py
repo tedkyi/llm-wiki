@@ -469,6 +469,30 @@ def test_apply_fixes_noop_when_not_fixable() -> None:
     assert parsed.body == "unchanged"
 
 
+def test_apply_fixes_relint_loop_completes(paths: cfg.WikiPaths) -> None:
+    # Regression: apply_fixes' internal re-lint call passed an invalid kwarg
+    # (`client=None`) to run_lint, raising TypeError. That path only runs after
+    # a fix is actually applied, so a fixable issue is required to reach it.
+    from llm_wiki import db
+
+    db.init_db(paths.state_db)  # run_lint's stale-source check queries this
+    _write(paths, "entities/g.md", "Google is a company.\n",
+           title="Google", type="entity")
+    report = lint.run_lint(paths, deep=False)
+    assert any(i.fixable for i in report.issues), "need a fixable issue to reach the loop"
+
+    # Must complete without raising (the bug surfaced here).
+    modified = lint.apply_fixes(paths, report.issues)
+    assert modified >= 1
+
+    # And the fix was genuinely applied + re-lint found nothing new to fix.
+    parsed = page_writer.parse_page(
+        (paths.wiki / "entities" / "g.md").read_text(encoding="utf-8")
+    )
+    assert parsed.body.lstrip().startswith("# Google")
+    assert not any(i.fixable for i in lint.run_lint(paths, deep=False).issues)
+
+
 # ---------------------------------------------------------------------------
 # LintReport.health_score
 # ---------------------------------------------------------------------------
