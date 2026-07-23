@@ -461,6 +461,70 @@ def _resolve_source_slug(
     return slugify.slugify(extraction.source_slug or extraction.title)
 
 
+def _merge_file_paths(
+    existing_source_page: page_writer.ParsedPage | None, source_relpath: str
+) -> list[str]:
+    """Authoritative `file_path` list for a source page.
+
+    This is pipeline-owned metadata: it's the set of source records this page
+    represents (a source page can accumulate multiple preprint versions), and it
+    must always come from the DB relpath — never from the LLM's frontmatter,
+    whose copy can be malformed. We start from the existing page's paths (on a
+    merge) and add this ingest's relpath.
+    """
+    paths: list[str] = []
+    if existing_source_page is not None:
+        prior = existing_source_page.frontmatter.get("file_path")
+        if isinstance(prior, list):
+            paths = [p for p in prior if isinstance(p, str)]
+        elif isinstance(prior, str):
+            paths = [prior]
+    if source_relpath not in paths:
+        paths.append(source_relpath)
+    return paths
+
+
+def _assemble_source_page(
+    full: str,
+    *,
+    source_title: str,
+    tags: list[str],
+    today: str,
+    source_relpath: str,
+    existing_source_page: page_writer.ParsedPage | None,
+) -> str:
+    """Turn a raw PASS-3 LLM response into the final `sources/<slug>.md` markdown.
+
+    Extracted from `ingest_source` so the duplicate-header regression is
+    unit-testable without an LLM. Two invariants protect against that bug:
+
+    1. When the frontmatter is missing we synthesize one but do NOT reassign the
+       body — `parse_page` has already stripped any (even malformed) frontmatter
+       block from it, so reattaching the raw content would duplicate the header.
+    2. `file_path` is always set authoritatively via `_merge_file_paths`, so the
+       LLM's own (often invalid, double-quoted-Windows-path) copy is discarded.
+    """
+    content = page_writer.strip_llm_noise(full)
+    parsed_page = page_writer.parse_page(content)
+    if not parsed_page.frontmatter:
+        if existing_source_page is not None:
+            parsed_page.frontmatter = dict(existing_source_page.frontmatter)
+            parsed_page.frontmatter["updated"] = today
+        else:
+            parsed_page.frontmatter = {
+                "title": source_title,
+                "type": "source",
+                "tags": tags,
+                "created": today,
+                "updated": today,
+            }
+        # NB: intentionally not touching parsed_page.body — see invariant 1.
+    parsed_page.frontmatter["file_path"] = _merge_file_paths(
+        existing_source_page, source_relpath
+    )
+    return parsed_page.to_markdown()
+
+
 def _auto_discover_pending(paths: cfg.WikiPaths) -> int:
     """Scan raw/ for files not yet tracked in the DB and register them.
 
@@ -1014,34 +1078,14 @@ def ingest_source(
             logger.info(f"LLM call end: {_elapsed:.1f}s, {len(full)} chars")
             logger.raw(f"SOURCE PAGE {source_slug}", full)
 
-            content = page_writer.strip_llm_noise(full)
-            parsed_page = page_writer.parse_page(content)
-            if not parsed_page.frontmatter:
-                if existing_source_page is not None:
-                    frontmatter = dict(existing_source_page.frontmatter)
-                    paths = frontmatter.get("file_path")
-                    if isinstance(paths, list):
-                        paths = list(paths)
-                    elif isinstance(paths, str):
-                        paths = [paths]
-                    else:
-                        paths = []
-                    if source_row["relpath"] not in paths:
-                        paths.append(source_row["relpath"])
-                    frontmatter["file_path"] = paths
-                    frontmatter["updated"] = today
-                    parsed_page.frontmatter = frontmatter
-                else:
-                    parsed_page.frontmatter = {
-                        "title": parsed.title,
-                        "type": "source",
-                        "tags": extraction.tags,
-                        "created": today,
-                        "updated": today,
-                        "file_path": [source_row["relpath"]],
-                    }
-                parsed_page.body = content
-            content = parsed_page.to_markdown()
+            content = _assemble_source_page(
+                full,
+                source_title=parsed.title,
+                tags=extraction.tags,
+                today=today,
+                source_relpath=source_row["relpath"],
+                existing_source_page=existing_source_page,
+            )
 
             source_staged.write_text(content, encoding="utf-8")
             change = PageChange(
